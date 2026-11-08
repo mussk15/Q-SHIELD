@@ -33,3 +33,5 @@ data/*.jsonl
 data/blocklist.json
 data/commands.jsonl
 data/benchmarks.json
+# Runtime security event logs
+logs/
