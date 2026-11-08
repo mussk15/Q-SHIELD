@@ -6,10 +6,9 @@ from qshield.net.protocol import send_message, receive_message
 HOST = "127.0.0.1"
 PORT = 5000
 
-# Maximum number of clients allowed at the same time
 MAX_CLIENTS = 5
+CLIENT_TIMEOUT = 30
 
-# Controls how many clients can be active simultaneously
 client_slots = threading.BoundedSemaphore(MAX_CLIENTS)
 
 
@@ -17,11 +16,17 @@ def handle_client(conn, addr):
     print("Connected by:", addr)
 
     try:
+        # Close connections that remain idle for too long
+        conn.settimeout(CLIENT_TIMEOUT)
+
         message = receive_message(conn)
 
         print("Client says:", message)
 
         send_message(conn, "Message received by Q-SHIELD Server!")
+
+    except socket.timeout:
+        print("Client timed out:", addr)
 
     except (ConnectionError, OSError, ValueError, UnicodeDecodeError) as error:
         print("Client communication error:", error)
@@ -30,7 +35,7 @@ def handle_client(conn, addr):
         try:
             conn.close()
         finally:
-            # Release the slot when this client disconnects
+            # Make the client slot available again
             client_slots.release()
 
         print("Connection closed:", addr)
@@ -48,11 +53,11 @@ def start_server():
         print("Q-SHIELD Server is running...")
         print("Waiting for client connections...")
         print("Maximum active clients:", MAX_CLIENTS)
+        print("Client timeout:", CLIENT_TIMEOUT, "seconds")
 
         while True:
             conn, addr = server.accept()
 
-            # Check whether a client slot is available
             if not client_slots.acquire(blocking=False):
                 print("Maximum clients reached. Rejecting:", addr)
                 conn.close()
@@ -68,7 +73,6 @@ def start_server():
                 client_thread.start()
 
             except Exception:
-                # Clean up if the thread could not start
                 conn.close()
                 client_slots.release()
                 raise
