@@ -1,0 +1,49 @@
+Q-SHIELD MEMBER 4 — WINDOWS QUICK START
+
+IMPORTANT: Extract this ZIP once. The ZIP contains one folder named Q-SHIELD_Member4.
+Recommended extraction location: C:\Users\varsh\Downloads
+After extraction, open this folder in VS Code:
+C:\Users\varsh\Downloads\Q-SHIELD_Member4
+
+In the VS Code terminal (Command Prompt), run these commands one at a time:
+
+1) Check Python:
+   py --version
+
+2) Create a virtual environment:
+   py -m venv .venv
+
+3) Activate it:
+   .venv\Scripts\activate.bat
+
+4) Install packages:
+   python -m pip install --upgrade pip
+   python -m pip install -r requirements.txt
+
+5) Create the local environment file:
+   copy .env.example .env
+
+6) Open .env and replace the example password with your own:
+   notepad .env
+
+7) Create synthetic preview records:
+   python scripts\create_demo_data.py
+
+8) Run the nine unit tests:
+   python -m pytest -q
+
+9) Start the dashboard:
+   python -m streamlit run dashboard\app.py --server.port 8502
+
+10) Open this address in your browser:
+    http://localhost:8502
+
+Login username: analyst
+Login password: the password you entered in .env
+
+TROUBLESHOOTING
+- If 'python' is not found, use 'py' for the initial environment creation.
+- Make sure the terminal is in the folder containing requirements.txt.
+- Do not extract the ZIP into another folder with the same name. Extract it directly into Downloads.
+- Do not upload .env, private keys or secrets to GitHub.
+- The demo JSONL files are synthetic examples, not real attack results.

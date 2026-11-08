@@ -3,3 +3,6 @@ cryptography
 pytest
 python-dotenv
 pyyaml
+streamlit>=1.40,<2.0
+pandas>=2.2,<4.0
+altair>=5.0,<7.0
