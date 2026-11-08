@@ -1,0 +1,5 @@
+
+cryptography
+pytest
+python-dotenv
+pyyaml

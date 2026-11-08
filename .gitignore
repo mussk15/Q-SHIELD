@@ -1,0 +1,30 @@
+
+# Python virtual environment
+.venv/
+venv/
+env/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+
+# Secret configuration
+.env
+.env.*
+!.env.example
+
+# Private keys and local keystores
+keys/
+*.pem
+*.key
+
+# Test and coverage files
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE and operating system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
