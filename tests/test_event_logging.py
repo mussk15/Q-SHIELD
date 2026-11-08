@@ -14,7 +14,7 @@ class TestEventLogging(unittest.TestCase):
             log_path = Path(temp_dir) / "events.jsonl"
 
             event = log_event(
-                "CLIENT_CONNECTED",
+                "client_connected",
                 severity="INFO",
                 source="127.0.0.1:5000",
                 details={"message": "Client connected"},
@@ -26,7 +26,7 @@ class TestEventLogging(unittest.TestCase):
             )
 
             self.assertEqual(
-                saved_event["event_type"], "CLIENT_CONNECTED"
+                saved_event["event_type"], "client_connected"
             )
             self.assertEqual(saved_event["severity"], "INFO")
             self.assertEqual(saved_event["source"], "127.0.0.1:5000")
@@ -45,7 +45,7 @@ class TestEventLogging(unittest.TestCase):
 
             with self.assertRaises(ValueError):
                 log_event(
-                    "CLIENT_CONNECTED",
+                    "client_connected",
                     severity="UNKNOWN",
                     log_file=log_path
                 )
@@ -56,7 +56,7 @@ class TestEventLogging(unittest.TestCase):
 
             def write_event(number):
                 log_event(
-                    "CLIENT_CONNECTED",
+                    "client_connected",
                     source=f"client-{number}",
                     log_file=log_path
                 )
@@ -88,3 +88,4 @@ class TestEventLogging(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

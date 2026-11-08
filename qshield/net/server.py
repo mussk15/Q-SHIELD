@@ -1,8 +1,13 @@
 ﻿import json
+import os
 import socket
+import tempfile
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+from dotenv import load_dotenv
 
 from qshield.net.protocol import send_message, receive_message
 
@@ -14,19 +19,37 @@ CLIENT_TIMEOUT = 30
 
 client_slots = threading.BoundedSemaphore(MAX_CLIENTS)
 
-# Save security events in the project logs folder
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-LOG_FILE = PROJECT_ROOT / "logs" / "security_events.jsonl"
+load_dotenv(PROJECT_ROOT / ".env")
 
-# Prevent simultaneous threads from mixing log entries
+configured_dir = Path(os.getenv("QSHIELD_DATA_DIR", "data"))
+DATA_DIR = (
+    configured_dir
+    if configured_dir.is_absolute()
+    else PROJECT_ROOT / configured_dir
+)
+
+EVENTS_FILE = DATA_DIR / "events.jsonl"
+SESSIONS_FILE = DATA_DIR / "sessions.jsonl"
+
 log_lock = threading.Lock()
+session_lock = threading.Lock()
 
 VALID_SEVERITIES = {"INFO", "WARNING", "ERROR", "CRITICAL"}
 
 
-def log_event(event_type, severity="INFO", source=None, details=None,
-              log_file=None):
-    """Save one security event as a JSON line."""
+def log_event(
+    event_type,
+    severity="INFO",
+    source=None,
+    details=None,
+    log_file=None,
+    outcome="success",
+    source_ip=None,
+    session_id=None,
+    byte_count=0
+):
+    """Write a structured security event for the dashboard."""
 
     if not isinstance(event_type, str) or not event_type.strip():
         raise ValueError("Event type must be a non-empty string")
@@ -40,15 +63,27 @@ def log_event(event_type, severity="INFO", source=None, details=None,
     if details is not None and not isinstance(details, dict):
         raise TypeError("Details must be a dictionary or None")
 
+    if not isinstance(outcome, str) or not outcome:
+        raise ValueError("Outcome must be a non-empty string")
+
+    if not isinstance(byte_count, int) or isinstance(byte_count, bool) or byte_count < 0:
+        raise ValueError("Byte count must be a non-negative integer")
+
     event = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "event_type": event_type,
+        "event_type": event_type.lower(),
+        "outcome": outcome,
+        "source_ip": source_ip,
+        "session_id": session_id,
+        "bytes": byte_count,
+
+        # Retained for compatibility with existing logging tests
         "severity": severity,
         "source": source,
         "details": details if details is not None else {}
     }
 
-    destination = Path(log_file) if log_file else LOG_FILE
+    destination = Path(log_file) if log_file else EVENTS_FILE
     serialized_event = json.dumps(event, ensure_ascii=False)
 
     with log_lock:
@@ -60,23 +95,128 @@ def log_event(event_type, severity="INFO", source=None, details=None,
     return event
 
 
-def safe_log_event(event_type, severity="INFO", source=None, details=None):
-    """Prevent a logging failure from interrupting server communication."""
+def safe_log_event(*args, **kwargs):
+    """Ensure logging errors do not interrupt server communication."""
 
     try:
-        log_event(event_type, severity, source, details)
+        return log_event(*args, **kwargs)
     except (OSError, TypeError, ValueError) as error:
         print("Security logging error:", error)
+        return None
+
+
+def update_session(session_id, status, remote_ip, started_at=None):
+    """Create or update one session record without duplicate session IDs."""
+
+    with session_lock:
+        SESSIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+        records = []
+
+        if SESSIONS_FILE.exists():
+            with SESSIONS_FILE.open("r", encoding="utf-8") as file:
+                for line in file:
+                    if not line.strip():
+                        continue
+
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError as error:
+                        raise ValueError(
+                            "Existing sessions.jsonl contains invalid JSON"
+                        ) from error
+
+                    if not isinstance(record, dict):
+                        raise ValueError(
+                            "Existing session record must be a JSON object"
+                        )
+
+                    if record.get("session_id") != session_id:
+                        records.append(record)
+
+        existing = next(
+            (
+                record for record in records
+                if record.get("session_id") == session_id
+            ),
+            None
+        )
+
+        # A newly created session has no authenticated user or key fingerprint.
+        session = {
+            "session_id": session_id,
+            "user_id": "unauthenticated",
+            "remote_ip": remote_ip,
+            "status": status,
+            "started_at": started_at or datetime.now(timezone.utc).isoformat()
+        }
+
+        if status == "Disconnected":
+            session["ended_at"] = datetime.now(timezone.utc).isoformat()
+
+        # Preserve the original start time during status updates.
+        if existing:
+            session["started_at"] = existing["started_at"]
+
+        records.append(session)
+
+        # Write a complete updated file and atomically replace the old file.
+        temporary_path = None
+
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=DATA_DIR,
+                prefix=".sessions_",
+                suffix=".tmp",
+                delete=False
+            ) as temporary_file:
+                temporary_path = Path(temporary_file.name)
+
+                for record in records:
+                    temporary_file.write(
+                        json.dumps(record, ensure_ascii=False) + "\n"
+                    )
+
+                temporary_file.flush()
+                os.fsync(temporary_file.fileno())
+
+            os.replace(temporary_path, SESSIONS_FILE)
+
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+
+        return session
 
 
 def handle_client(conn, addr):
     client_address = f"{addr[0]}:{addr[1]}"
+    session_id = f"session-{uuid.uuid4().hex}"
+    started_at = datetime.now(timezone.utc).isoformat()
 
     print("Connected by:", addr)
 
+    try:
+        update_session(
+            session_id,
+            "Active",
+            addr[0],
+            started_at
+        )
+
+    except (OSError, ValueError) as error:
+        print("Unable to create session:", error)
+        conn.close()
+        client_slots.release()
+        return
+
     safe_log_event(
-        "CLIENT_CONNECTED",
-        source=client_address
+        "client_connected",
+        source=client_address,
+        source_ip=addr[0],
+        session_id=session_id
     )
 
     try:
@@ -84,41 +224,54 @@ def handle_client(conn, addr):
 
         message = receive_message(conn)
 
+        message_bytes = len(message.encode("utf-8"))
+
         print("Client says:", message)
 
         send_message(conn, "Message received by Q-SHIELD Server!")
 
         safe_log_event(
-            "MESSAGE_RECEIVED",
+            "message_received",
             source=client_address,
-            details={"message_length": len(message.encode("utf-8"))}
+            source_ip=addr[0],
+            session_id=session_id,
+            byte_count=message_bytes
         )
 
     except socket.timeout:
         print("Client timed out:", addr)
 
         safe_log_event(
-            "CLIENT_TIMEOUT",
+            "client_timeout",
             severity="WARNING",
-            source=client_address
+            outcome="timeout",
+            source=client_address,
+            source_ip=addr[0],
+            session_id=session_id
         )
 
     except UnicodeDecodeError as error:
         print("Invalid message encoding:", error)
 
         safe_log_event(
-            "INVALID_MESSAGE_ENCODING",
+            "invalid_message_encoding",
             severity="WARNING",
-            source=client_address
+            outcome="rejected",
+            source=client_address,
+            source_ip=addr[0],
+            session_id=session_id
         )
 
     except ValueError as error:
         print("Invalid client message:", error)
 
         safe_log_event(
-            "INVALID_CLIENT_MESSAGE",
+            "invalid_client_message",
             severity="WARNING",
+            outcome="rejected",
             source=client_address,
+            source_ip=addr[0],
+            session_id=session_id,
             details={"error": str(error)}
         )
 
@@ -126,9 +279,12 @@ def handle_client(conn, addr):
         print("Client communication error:", error)
 
         safe_log_event(
-            "COMMUNICATION_ERROR",
+            "communication_error",
             severity="ERROR",
+            outcome="failure",
             source=client_address,
+            source_ip=addr[0],
+            session_id=session_id,
             details={"error": str(error)}
         )
 
@@ -136,13 +292,25 @@ def handle_client(conn, addr):
         try:
             conn.close()
         finally:
+            try:
+                update_session(
+                    session_id,
+                    "Disconnected",
+                    addr[0],
+                    started_at
+                )
+            except (OSError, ValueError) as error:
+                print("Session update error:", error)
+
             client_slots.release()
 
         print("Connection closed:", addr)
 
         safe_log_event(
-            "CLIENT_DISCONNECTED",
-            source=client_address
+            "client_disconnected",
+            source=client_address,
+            source_ip=addr[0],
+            session_id=session_id
         )
 
 
@@ -159,10 +327,12 @@ def start_server():
         print("Waiting for client connections...")
         print("Maximum active clients:", MAX_CLIENTS)
         print("Client timeout:", CLIENT_TIMEOUT, "seconds")
+        print("Dashboard data directory:", DATA_DIR)
 
         safe_log_event(
-            "SERVER_STARTED",
+            "server_started",
             source=f"{HOST}:{PORT}",
+            source_ip=HOST,
             details={
                 "maximum_clients": MAX_CLIENTS,
                 "client_timeout_seconds": CLIENT_TIMEOUT
@@ -176,9 +346,11 @@ def start_server():
                 print("Maximum clients reached. Rejecting:", addr)
 
                 safe_log_event(
-                    "CONNECTION_REJECTED",
+                    "connection_rejected",
                     severity="WARNING",
+                    outcome="rejected",
                     source=f"{addr[0]}:{addr[1]}",
+                    source_ip=addr[0],
                     details={"reason": "Maximum active clients reached"}
                 )
 
@@ -199,9 +371,11 @@ def start_server():
                 client_slots.release()
 
                 safe_log_event(
-                    "CLIENT_THREAD_START_FAILED",
+                    "client_thread_start_failed",
                     severity="ERROR",
+                    outcome="failure",
                     source=f"{addr[0]}:{addr[1]}",
+                    source_ip=addr[0],
                     details={"error": str(error)}
                 )
 
@@ -211,8 +385,9 @@ def start_server():
         print("\nQ-SHIELD Server is shutting down...")
 
         safe_log_event(
-            "SERVER_SHUTDOWN",
-            source=f"{HOST}:{PORT}"
+            "server_shutdown",
+            source=f"{HOST}:{PORT}",
+            source_ip=HOST
         )
 
     finally:
