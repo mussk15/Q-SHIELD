@@ -28,3 +28,8 @@ htmlcov/
 .idea/
 .DS_Store
 Thumbs.db
+# Q-SHIELD dashboard runtime data
+data/*.jsonl
+data/blocklist.json
+data/commands.jsonl
+data/benchmarks.json
