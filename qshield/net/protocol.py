@@ -1,7 +1,16 @@
 import struct
 
+MAX_MESSAGE_SIZE = 1024 * 1024  # 1 MB
+
+
 def send_message(conn, message):
+    if not isinstance(message, str):
+        raise TypeError("Message must be a string")
+
     data = message.encode("utf-8")
+
+    if len(data) > MAX_MESSAGE_SIZE:
+        raise ValueError("Message too large")
 
     length = len(data)
 
@@ -11,7 +20,7 @@ def send_message(conn, message):
 
 
 def receive_exact(conn, size):
-    data = b""
+    data = bytearray()
 
     while len(data) < size:
         chunk = conn.recv(size - len(data))
@@ -19,9 +28,9 @@ def receive_exact(conn, size):
         if not chunk:
             raise ConnectionError("Connection closed")
 
-        data += chunk
+        data.extend(chunk)
 
-    return data
+    return bytes(data)
 
 
 def receive_message(conn):
@@ -29,7 +38,7 @@ def receive_message(conn):
 
     length = struct.unpack("!I", header)[0]
 
-    if length > 1024 * 1024:
+    if length > MAX_MESSAGE_SIZE:
         raise ValueError("Message too large")
 
     data = receive_exact(conn, length)
