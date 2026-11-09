@@ -1,0 +1,1 @@
+timestamp,src_ip,window_seconds,packet_count,connection_attempts,syn_count,syn_ack_count,rst_count,half_open_syns,failed_handshakes,distinct_dst_ports,distinct_dst_ips,bytes_total,message_rate,label
