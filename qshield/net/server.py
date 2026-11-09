@@ -3,13 +3,22 @@ import os
 import socket
 import tempfile
 import threading
+import time
 import uuid
+
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 from qshield.net.protocol import send_message, receive_message
+from response.blocklist import is_blocked
+
+
+# --------------------------------------------------
+# SERVER CONFIGURATION
+# --------------------------------------------------
 
 HOST = "127.0.0.1"
 PORT = 5000
@@ -17,12 +26,28 @@ PORT = 5000
 MAX_CLIENTS = 5
 CLIENT_TIMEOUT = 30
 
+# Rate-limiting configuration
+RATE_LIMIT_ATTEMPTS = 10
+RATE_LIMIT_WINDOW = 60
+RATE_LIMIT_COOLDOWN = 60
+
 client_slots = threading.BoundedSemaphore(MAX_CLIENTS)
 
+connection_attempts = defaultdict(deque)
+temporarily_blocked = {}
+rate_limit_lock = threading.Lock()
+
+
+# --------------------------------------------------
+# DATA DIRECTORY
+# --------------------------------------------------
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
 load_dotenv(PROJECT_ROOT / ".env")
 
 configured_dir = Path(os.getenv("QSHIELD_DATA_DIR", "data"))
+
 DATA_DIR = (
     configured_dir
     if configured_dir.is_absolute()
@@ -37,6 +62,10 @@ session_lock = threading.Lock()
 
 VALID_SEVERITIES = {"INFO", "WARNING", "ERROR", "CRITICAL"}
 
+
+# --------------------------------------------------
+# SECURITY EVENT LOGGING
+# --------------------------------------------------
 
 def log_event(
     event_type,
@@ -66,7 +95,11 @@ def log_event(
     if not isinstance(outcome, str) or not outcome:
         raise ValueError("Outcome must be a non-empty string")
 
-    if not isinstance(byte_count, int) or isinstance(byte_count, bool) or byte_count < 0:
+    if (
+        not isinstance(byte_count, int)
+        or isinstance(byte_count, bool)
+        or byte_count < 0
+    ):
         raise ValueError("Byte count must be a non-negative integer")
 
     event = {
@@ -76,8 +109,6 @@ def log_event(
         "source_ip": source_ip,
         "session_id": session_id,
         "bytes": byte_count,
-
-        # Retained for compatibility with existing logging tests
         "severity": severity,
         "source": source,
         "details": details if details is not None else {}
@@ -96,7 +127,7 @@ def log_event(
 
 
 def safe_log_event(*args, **kwargs):
-    """Ensure logging errors do not interrupt server communication."""
+    """Prevent logging errors from interrupting server communication."""
 
     try:
         return log_event(*args, **kwargs)
@@ -105,22 +136,80 @@ def safe_log_event(*args, **kwargs):
         return None
 
 
+# --------------------------------------------------
+# CONNECTION SECURITY: BLOCKLIST + RATE LIMITING
+# --------------------------------------------------
+
+def check_connection_allowed(ip):
+    """Check dashboard blocklist and connection rate limits."""
+
+    # Check the dashboard-managed IP blocklist.
+    try:
+        if is_blocked(ip, DATA_DIR / "blocklist.json"):
+            return False, "IP address is on the dashboard blocklist"
+
+    except (OSError, RuntimeError, ValueError) as error:
+        print("Blocklist check failed:", error)
+        return False, "Blocklist could not be checked"
+
+    now = time.monotonic()
+
+    with rate_limit_lock:
+
+        # Check whether this IP is in its temporary cooldown.
+        blocked_until = temporarily_blocked.get(ip)
+
+        if blocked_until is not None:
+
+            if now < blocked_until:
+                return False, "Connection rate limit cooldown"
+
+            temporarily_blocked.pop(ip, None)
+
+        attempts = connection_attempts[ip]
+
+        # Remove attempts older than the rolling time window.
+        while attempts and now - attempts[0] >= RATE_LIMIT_WINDOW:
+            attempts.popleft()
+
+        # Reject if the IP has reached its attempt limit.
+        if len(attempts) >= RATE_LIMIT_ATTEMPTS:
+
+            temporarily_blocked[ip] = now + RATE_LIMIT_COOLDOWN
+
+            return False, "Too many connection attempts"
+
+        attempts.append(now)
+
+        return True, "Allowed"
+
+
+# --------------------------------------------------
+# SESSION MANAGEMENT
+# --------------------------------------------------
+
 def update_session(session_id, status, remote_ip, started_at=None):
-    """Create or update one session record without duplicate session IDs."""
+    """Create or update a session record without duplicate IDs."""
 
     with session_lock:
+
         SESSIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
 
         records = []
+        existing = None
 
         if SESSIONS_FILE.exists():
+
             with SESSIONS_FILE.open("r", encoding="utf-8") as file:
+
                 for line in file:
+
                     if not line.strip():
                         continue
 
                     try:
                         record = json.loads(line)
+
                     except json.JSONDecodeError as error:
                         raise ValueError(
                             "Existing sessions.jsonl contains invalid JSON"
@@ -131,39 +220,32 @@ def update_session(session_id, status, remote_ip, started_at=None):
                             "Existing session record must be a JSON object"
                         )
 
-                    if record.get("session_id") != session_id:
+                    if record.get("session_id") == session_id:
+                        existing = record
+                    else:
                         records.append(record)
 
-        existing = next(
-            (
-                record for record in records
-                if record.get("session_id") == session_id
-            ),
-            None
-        )
-
-        # A newly created session has no authenticated user or key fingerprint.
         session = {
             "session_id": session_id,
             "user_id": "unauthenticated",
             "remote_ip": remote_ip,
             "status": status,
-            "started_at": started_at or datetime.now(timezone.utc).isoformat()
+            "started_at": (
+                existing.get("started_at")
+                if existing
+                else started_at or datetime.now(timezone.utc).isoformat()
+            )
         }
 
         if status == "Disconnected":
             session["ended_at"] = datetime.now(timezone.utc).isoformat()
 
-        # Preserve the original start time during status updates.
-        if existing:
-            session["started_at"] = existing["started_at"]
-
         records.append(session)
 
-        # Write a complete updated file and atomically replace the old file.
         temporary_path = None
 
         try:
+
             with tempfile.NamedTemporaryFile(
                 mode="w",
                 encoding="utf-8",
@@ -172,6 +254,7 @@ def update_session(session_id, status, remote_ip, started_at=None):
                 suffix=".tmp",
                 delete=False
             ) as temporary_file:
+
                 temporary_path = Path(temporary_file.name)
 
                 for record in records:
@@ -185,20 +268,29 @@ def update_session(session_id, status, remote_ip, started_at=None):
             os.replace(temporary_path, SESSIONS_FILE)
 
         finally:
+
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
 
         return session
 
 
+# --------------------------------------------------
+# CLIENT HANDLER
+# --------------------------------------------------
+
 def handle_client(conn, addr):
+
     client_address = f"{addr[0]}:{addr[1]}"
+
     session_id = f"session-{uuid.uuid4().hex}"
+
     started_at = datetime.now(timezone.utc).isoformat()
 
     print("Connected by:", addr)
 
     try:
+
         update_session(
             session_id,
             "Active",
@@ -207,9 +299,12 @@ def handle_client(conn, addr):
         )
 
     except (OSError, ValueError) as error:
+
         print("Unable to create session:", error)
+
         conn.close()
         client_slots.release()
+
         return
 
     safe_log_event(
@@ -220,6 +315,7 @@ def handle_client(conn, addr):
     )
 
     try:
+
         conn.settimeout(CLIENT_TIMEOUT)
 
         message = receive_message(conn)
@@ -228,7 +324,10 @@ def handle_client(conn, addr):
 
         print("Client says:", message)
 
-        send_message(conn, "Message received by Q-SHIELD Server!")
+        send_message(
+            conn,
+            "Message received by Q-SHIELD Server!"
+        )
 
         safe_log_event(
             "message_received",
@@ -239,6 +338,7 @@ def handle_client(conn, addr):
         )
 
     except socket.timeout:
+
         print("Client timed out:", addr)
 
         safe_log_event(
@@ -251,6 +351,7 @@ def handle_client(conn, addr):
         )
 
     except UnicodeDecodeError as error:
+
         print("Invalid message encoding:", error)
 
         safe_log_event(
@@ -263,6 +364,7 @@ def handle_client(conn, addr):
         )
 
     except ValueError as error:
+
         print("Invalid client message:", error)
 
         safe_log_event(
@@ -276,6 +378,7 @@ def handle_client(conn, addr):
         )
 
     except (ConnectionError, OSError) as error:
+
         print("Client communication error:", error)
 
         safe_log_event(
@@ -289,16 +392,21 @@ def handle_client(conn, addr):
         )
 
     finally:
+
         try:
             conn.close()
+
         finally:
+
             try:
+
                 update_session(
                     session_id,
                     "Disconnected",
                     addr[0],
                     started_at
                 )
+
             except (OSError, ValueError) as error:
                 print("Session update error:", error)
 
@@ -314,12 +422,25 @@ def handle_client(conn, addr):
         )
 
 
-def start_server():
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+# --------------------------------------------------
+# START SERVER
+# --------------------------------------------------
 
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+def start_server():
+
+    server = socket.socket(
+        socket.AF_INET,
+        socket.SOCK_STREAM
+    )
+
+    server.setsockopt(
+        socket.SOL_SOCKET,
+        socket.SO_REUSEADDR,
+        1
+    )
 
     try:
+
         server.bind((HOST, PORT))
         server.listen(5)
 
@@ -327,6 +448,9 @@ def start_server():
         print("Waiting for client connections...")
         print("Maximum active clients:", MAX_CLIENTS)
         print("Client timeout:", CLIENT_TIMEOUT, "seconds")
+        print("Connection attempts allowed:", RATE_LIMIT_ATTEMPTS)
+        print("Rate limit window:", RATE_LIMIT_WINDOW, "seconds")
+        print("Rate limit cooldown:", RATE_LIMIT_COOLDOWN, "seconds")
         print("Dashboard data directory:", DATA_DIR)
 
         safe_log_event(
@@ -335,14 +459,39 @@ def start_server():
             source_ip=HOST,
             details={
                 "maximum_clients": MAX_CLIENTS,
-                "client_timeout_seconds": CLIENT_TIMEOUT
+                "client_timeout_seconds": CLIENT_TIMEOUT,
+                "rate_limit_attempts": RATE_LIMIT_ATTEMPTS,
+                "rate_limit_window_seconds": RATE_LIMIT_WINDOW,
+                "rate_limit_cooldown_seconds": RATE_LIMIT_COOLDOWN
             }
         )
 
         while True:
+
             conn, addr = server.accept()
 
+            # Check blocklist and rate limit before creating a session.
+            allowed, reason = check_connection_allowed(addr[0])
+
+            if not allowed:
+
+                print("Connection rejected:", addr, "-", reason)
+
+                safe_log_event(
+                    "connection_rejected",
+                    severity="WARNING",
+                    outcome="rejected",
+                    source=f"{addr[0]}:{addr[1]}",
+                    source_ip=addr[0],
+                    details={"reason": reason}
+                )
+
+                conn.close()
+                continue
+
+            # Enforce maximum simultaneous clients.
             if not client_slots.acquire(blocking=False):
+
                 print("Maximum clients reached. Rejecting:", addr)
 
                 safe_log_event(
@@ -351,13 +500,16 @@ def start_server():
                     outcome="rejected",
                     source=f"{addr[0]}:{addr[1]}",
                     source_ip=addr[0],
-                    details={"reason": "Maximum active clients reached"}
+                    details={
+                        "reason": "Maximum active clients reached"
+                    }
                 )
 
                 conn.close()
                 continue
 
             try:
+
                 client_thread = threading.Thread(
                     target=handle_client,
                     args=(conn, addr),
@@ -367,6 +519,7 @@ def start_server():
                 client_thread.start()
 
             except Exception as error:
+
                 conn.close()
                 client_slots.release()
 
@@ -382,6 +535,7 @@ def start_server():
                 raise
 
     except KeyboardInterrupt:
+
         print("\nQ-SHIELD Server is shutting down...")
 
         safe_log_event(
@@ -391,6 +545,7 @@ def start_server():
         )
 
     finally:
+
         server.close()
 
 
