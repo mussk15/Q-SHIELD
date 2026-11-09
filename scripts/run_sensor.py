@@ -37,7 +37,7 @@ def main() -> None:
     source.add_argument("--live", action="store_true", help="Capture live TCP traffic")
     parser.add_argument("--interface", help="Capture interface name (live mode)")
     parser.add_argument("--duration", type=int, default=60, help="Live capture seconds")
-    parser.add_argument("--events", default="data/security_events.jsonl",
+    parser.add_argument("--events", default="data/events.jsonl",
                         help="Member 2 application-event JSONL path")
     parser.add_argument("--config", default="config/thresholds.yaml")
     parser.add_argument("--alerts", default="data/alerts.jsonl")

@@ -111,14 +111,25 @@ def value(item: dict[str, Any], *keys: str, default: Any = "") -> Any:
 def alerts_frame(records: list[dict[str, Any]]) -> pd.DataFrame:
     rows = [{
         "Time": value(row, "timestamp", "time", "created_at"),
-        "Alert": value(row, "type", "alert_type", "rule", "name", default="Security alert"),
+        "Alert": value(
+            row, "title", "type", "alert_type", "rule_id",
+            "rule", "name", default="Security alert"
+        ),
         "Source IP": value(row, "source_ip", "src_ip", "ip", "source"),
-        "Severity": str(value(row, "severity", "priority", default="LOW")).upper(),
+        "Severity": str(
+            value(row, "severity", "priority", default="LOW")
+        ).upper(),
         "Status": value(row, "status", "state", default="Open"),
-        "Evidence": value(row, "evidence", "description", "details"),
+        "Evidence": value(row, "description", "evidence", "details"),
     } for row in records]
-    return pd.DataFrame(rows, columns=["Time", "Alert", "Source IP", "Severity", "Status", "Evidence"])
 
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "Time", "Alert", "Source IP",
+            "Severity", "Status", "Evidence"
+        ]
+    )
 
 def sessions_frame(records: list[dict[str, Any]]) -> pd.DataFrame:
     rows = [{

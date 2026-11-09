@@ -69,3 +69,31 @@ def test_auth_failure_requires_threshold(tmp_path):
     assert engine.evaluate_application_event(event) == []
     assert any(a.rule_id == "AUTH_FAILURE"
                for a in engine.evaluate_application_event(event))
+
+
+def test_member2_invalid_message_maps_to_malformed_alert(tmp_path):
+    config = {
+        "rules": {
+            "malformed_input": {
+                "enabled": True,
+                "min_events": 1,
+                "severity": "HIGH",
+                "score": 85,
+            }
+        }
+    }
+
+    engine = RuleEngine(config, manager(tmp_path))
+
+    event = {
+        "event_type": "invalid_client_message",
+        "source_ip": "127.0.0.1",
+        "session_id": "test-session",
+        "details": {"error": "Invalid message type"},
+    }
+
+    alerts = engine.evaluate_application_event(event)
+
+    assert len(alerts) == 1
+    assert alerts[0].rule_id == "MALFORMED_INPUT"
+    assert alerts[0].severity == "HIGH"

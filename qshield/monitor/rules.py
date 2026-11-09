@@ -75,7 +75,12 @@ class RuleEngine:
 
     def evaluate_application_event(self, event: dict[str, Any]) -> list[Alert]:
         """Consume Member 2 JSONL events; payloads are never inspected."""
-        event_type = str(event.get("event_type", "")).upper()
+        raw_event_type = str(event.get("event_type", "")).upper()
+        event_type_mapping = {
+            "INVALID_CLIENT_MESSAGE": "MALFORMED",
+            "INVALID_MESSAGE_ENCODING": "MALFORMED",
+            }
+        event_type = event_type_mapping.get(raw_event_type, raw_event_type)
         source_ip = str(event.get("source_ip") or "unknown")
         emitted: list[Alert] = []
         rules = self.config.get("rules", {})
@@ -99,7 +104,12 @@ class RuleEngine:
             rule = rules.get("malformed_input", {})
             self._emit(emitted, source_ip, "MALFORMED_INPUT", "Malformed application input",
                        "Member 2 reported a message validation failure.",
-                       rule, {"event_type": event_type, "description": event.get("description")})
+                       rule, {
+                        "event_type": raw_event_type,
+                        "description": event.get("details", {}).get("error")
+                        or event.get("description")
+                        or "Member 2 reported invalid application input."
+                        })
 
         if event_type in {"REPLAY", "TAG_FAIL", "SIG_FAIL"}:
             rule = rules.get("replay_or_tamper", {})
