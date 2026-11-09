@@ -1,0 +1,35 @@
+window_seconds: 10
+alert_cooldown_seconds: 30
+
+rules:
+  port_scan:
+    enabled: true
+    min_distinct_ports: 12
+    min_connection_attempts: 15
+    severity: HIGH
+    score: 80
+
+  syn_flood:
+    enabled: true
+    min_syn_count: 30
+    min_half_open_syns: 20
+    severity: CRITICAL
+    score: 95
+
+  failed_login:
+    enabled: true
+    min_failures: 5
+    severity: HIGH
+    score: 85
+
+  malformed_input:
+    enabled: true
+    min_events: 1
+    severity: HIGH
+    score: 85
+
+  replay_or_tamper:
+    enabled: true
+    min_events: 1
+    severity: CRITICAL
+    score: 100
