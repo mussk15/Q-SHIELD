@@ -24,12 +24,13 @@ HOST = "127.0.0.1"
 PORT = 5000
 
 MAX_CLIENTS = 5
-CLIENT_TIMEOUT = 30
+CLIENT_TIMEOUT = 300
 
-# Rate-limiting configuration
 RATE_LIMIT_ATTEMPTS = 10
 RATE_LIMIT_WINDOW = 60
 RATE_LIMIT_COOLDOWN = 60
+
+COMMAND_POLL_INTERVAL = 1
 
 client_slots = threading.BoundedSemaphore(MAX_CLIENTS)
 
@@ -56,11 +57,23 @@ DATA_DIR = (
 
 EVENTS_FILE = DATA_DIR / "events.jsonl"
 SESSIONS_FILE = DATA_DIR / "sessions.jsonl"
+COMMANDS_FILE = DATA_DIR / "commands.jsonl"
+COMMAND_RESULTS_FILE = DATA_DIR / "command_results.jsonl"
 
 log_lock = threading.Lock()
 session_lock = threading.Lock()
+active_sessions_lock = threading.Lock()
+command_results_lock = threading.Lock()
 
 VALID_SEVERITIES = {"INFO", "WARNING", "ERROR", "CRITICAL"}
+
+# Active session ID -> connected socket
+active_sessions = {}
+
+# Session IDs currently undergoing termination
+terminating_sessions = set()
+
+command_stop_event = threading.Event()
 
 
 # --------------------------------------------------
@@ -78,8 +91,6 @@ def log_event(
     session_id=None,
     byte_count=0
 ):
-    """Write a structured security event for the dashboard."""
-
     if not isinstance(event_type, str) or not event_type.strip():
         raise ValueError("Event type must be a non-empty string")
 
@@ -122,13 +133,12 @@ def log_event(
 
         with destination.open("a", encoding="utf-8") as file:
             file.write(serialized_event + "\n")
+            file.flush()
 
     return event
 
 
 def safe_log_event(*args, **kwargs):
-    """Prevent logging errors from interrupting server communication."""
-
     try:
         return log_event(*args, **kwargs)
     except (OSError, TypeError, ValueError) as error:
@@ -137,13 +147,10 @@ def safe_log_event(*args, **kwargs):
 
 
 # --------------------------------------------------
-# CONNECTION SECURITY: BLOCKLIST + RATE LIMITING
+# CONNECTION SECURITY
 # --------------------------------------------------
 
 def check_connection_allowed(ip):
-    """Check dashboard blocklist and connection rate limits."""
-
-    # Check the dashboard-managed IP blocklist.
     try:
         if is_blocked(ip, DATA_DIR / "blocklist.json"):
             return False, "IP address is on the dashboard blocklist"
@@ -155,12 +162,9 @@ def check_connection_allowed(ip):
     now = time.monotonic()
 
     with rate_limit_lock:
-
-        # Check whether this IP is in its temporary cooldown.
         blocked_until = temporarily_blocked.get(ip)
 
         if blocked_until is not None:
-
             if now < blocked_until:
                 return False, "Connection rate limit cooldown"
 
@@ -168,19 +172,14 @@ def check_connection_allowed(ip):
 
         attempts = connection_attempts[ip]
 
-        # Remove attempts older than the rolling time window.
         while attempts and now - attempts[0] >= RATE_LIMIT_WINDOW:
             attempts.popleft()
 
-        # Reject if the IP has reached its attempt limit.
         if len(attempts) >= RATE_LIMIT_ATTEMPTS:
-
             temporarily_blocked[ip] = now + RATE_LIMIT_COOLDOWN
-
             return False, "Too many connection attempts"
 
         attempts.append(now)
-
         return True, "Allowed"
 
 
@@ -189,27 +188,20 @@ def check_connection_allowed(ip):
 # --------------------------------------------------
 
 def update_session(session_id, status, remote_ip, started_at=None):
-    """Create or update a session record without duplicate IDs."""
-
     with session_lock:
-
         SESSIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
 
         records = []
         existing = None
 
         if SESSIONS_FILE.exists():
-
             with SESSIONS_FILE.open("r", encoding="utf-8") as file:
-
                 for line in file:
-
                     if not line.strip():
                         continue
 
                     try:
                         record = json.loads(line)
-
                     except json.JSONDecodeError as error:
                         raise ValueError(
                             "Existing sessions.jsonl contains invalid JSON"
@@ -245,7 +237,6 @@ def update_session(session_id, status, remote_ip, started_at=None):
         temporary_path = None
 
         try:
-
             with tempfile.NamedTemporaryFile(
                 mode="w",
                 encoding="utf-8",
@@ -268,11 +259,201 @@ def update_session(session_id, status, remote_ip, started_at=None):
             os.replace(temporary_path, SESSIONS_FILE)
 
         finally:
-
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
 
         return session
+
+
+# --------------------------------------------------
+# COMMAND RESULTS AND ACKNOWLEDGEMENTS
+# --------------------------------------------------
+
+def load_processed_command_ids():
+    """Load command IDs already acknowledged by this server."""
+
+    processed = set()
+
+    if not COMMAND_RESULTS_FILE.exists():
+        return processed
+
+    with COMMAND_RESULTS_FILE.open("r", encoding="utf-8") as file:
+        for line in file:
+            if not line.strip():
+                continue
+
+            try:
+                result = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            if isinstance(result, dict) and result.get("command_id"):
+                processed.add(result["command_id"])
+
+    return processed
+
+
+def acknowledge_command(command, status, message):
+    """Append the result of a dashboard command."""
+
+    result = {
+        "command_id": command.get("command_id"),
+        "command": command.get("command"),
+        "session_id": command.get("session_id"),
+        "status": status,
+        "message": message,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+    COMMAND_RESULTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    with command_results_lock:
+        with COMMAND_RESULTS_FILE.open("a", encoding="utf-8") as file:
+            file.write(json.dumps(result, ensure_ascii=False) + "\n")
+            file.flush()
+            os.fsync(file.fileno())
+
+    print("Command result:", result)
+
+    safe_log_event(
+        "response_command_" + status,
+        severity="INFO" if status == "executed" else "WARNING",
+        outcome=status,
+        session_id=command.get("session_id"),
+        details={
+            "command_id": command.get("command_id"),
+            "command": command.get("command"),
+            "message": message
+        }
+    )
+
+    return result
+
+
+def execute_command(command):
+    """Validate and execute one dashboard command."""
+
+    if not isinstance(command, dict):
+        return
+
+    command_id = command.get("command_id")
+    command_type = command.get("command")
+    session_id = command.get("session_id")
+
+    if not isinstance(command_id, str) or not command_id.strip():
+        print("Rejected command without a valid command ID")
+        return
+
+    if not isinstance(session_id, str) or not session_id.strip():
+        acknowledge_command(
+            command,
+            "rejected",
+            "Invalid or missing session ID"
+        )
+        return
+
+    if command_type not in {"kill_session", "force_rekey"}:
+        acknowledge_command(
+            command,
+            "rejected",
+            "Unsupported command type"
+        )
+        return
+
+    if command_type == "force_rekey":
+        acknowledge_command(
+            command,
+            "deferred",
+            "Waiting for Member 1's cryptographic re-key implementation"
+        )
+        return
+
+    # Kill-session command
+    with active_sessions_lock:
+        target_socket = active_sessions.get(session_id)
+
+        if target_socket is None:
+            rejection_message = "Session is not currently connected to this server"
+
+        elif session_id in terminating_sessions:
+            rejection_message = "Session termination is already in progress"
+
+        else:
+            rejection_message = None
+            terminating_sessions.add(session_id)
+
+    if rejection_message is not None:
+        acknowledge_command(command, "rejected", rejection_message)
+        return
+
+    try:
+        target_socket.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+
+    try:
+        target_socket.close()
+    except OSError:
+        pass
+
+    acknowledge_command(
+        command,
+        "executed",
+        "Session termination requested by dashboard"
+    )
+
+    print("Session termination executed:", session_id)
+
+
+def command_processor():
+    """Continuously check the dashboard's append-only command queue."""
+
+    print("Dashboard command processor started.")
+
+    try:
+        processed_ids = load_processed_command_ids()
+    except OSError as error:
+        print("Unable to load processed command IDs:", error)
+        processed_ids = set()
+
+    while not command_stop_event.is_set():
+
+        try:
+            if COMMANDS_FILE.exists():
+
+                with COMMANDS_FILE.open("r", encoding="utf-8") as file:
+                    for line in file:
+
+                        if not line.strip():
+                            continue
+
+                        try:
+                            command = json.loads(line)
+                        except json.JSONDecodeError:
+                            print("Ignoring malformed command queue entry")
+                            continue
+
+                        if not isinstance(command, dict):
+                            continue
+
+                        command_id = command.get("command_id")
+
+                        if not isinstance(command_id, str):
+                            continue
+
+                        if command_id in processed_ids:
+                            continue
+
+                        if command.get("status") != "queued":
+                            continue
+
+                        execute_command(command)
+                        processed_ids.add(command_id)
+
+        except (OSError, RuntimeError, ValueError) as error:
+            print("Command processor error:", error)
+
+        command_stop_event.wait(COMMAND_POLL_INTERVAL)
 
 
 # --------------------------------------------------
@@ -282,15 +463,13 @@ def update_session(session_id, status, remote_ip, started_at=None):
 def handle_client(conn, addr):
 
     client_address = f"{addr[0]}:{addr[1]}"
-
     session_id = f"session-{uuid.uuid4().hex}"
-
     started_at = datetime.now(timezone.utc).isoformat()
 
     print("Connected by:", addr)
+    print("Session ID:", session_id)
 
     try:
-
         update_session(
             session_id,
             "Active",
@@ -299,13 +478,13 @@ def handle_client(conn, addr):
         )
 
     except (OSError, ValueError) as error:
-
         print("Unable to create session:", error)
-
         conn.close()
         client_slots.release()
-
         return
+
+    with active_sessions_lock:
+        active_sessions[session_id] = conn
 
     safe_log_event(
         "client_connected",
@@ -315,30 +494,31 @@ def handle_client(conn, addr):
     )
 
     try:
-
         conn.settimeout(CLIENT_TIMEOUT)
 
-        message = receive_message(conn)
+        # Keep receiving messages until the client disconnects
+        # or the dashboard terminates this session.
+        while True:
 
-        message_bytes = len(message.encode("utf-8"))
+            message = receive_message(conn)
+            message_bytes = len(message.encode("utf-8"))
 
-        print("Client says:", message)
+            print("Client says:", message)
 
-        send_message(
-            conn,
-            "Message received by Q-SHIELD Server!"
-        )
+            send_message(
+                conn,
+                "Message received by Q-SHIELD Server!"
+            )
 
-        safe_log_event(
-            "message_received",
-            source=client_address,
-            source_ip=addr[0],
-            session_id=session_id,
-            byte_count=message_bytes
-        )
+            safe_log_event(
+                "message_received",
+                source=client_address,
+                source_ip=addr[0],
+                session_id=session_id,
+                byte_count=message_bytes
+            )
 
     except socket.timeout:
-
         print("Client timed out:", addr)
 
         safe_log_event(
@@ -351,7 +531,6 @@ def handle_client(conn, addr):
         )
 
     except UnicodeDecodeError as error:
-
         print("Invalid message encoding:", error)
 
         safe_log_event(
@@ -364,7 +543,6 @@ def handle_client(conn, addr):
         )
 
     except ValueError as error:
-
         print("Invalid client message:", error)
 
         safe_log_event(
@@ -379,34 +557,40 @@ def handle_client(conn, addr):
 
     except (ConnectionError, OSError) as error:
 
-        print("Client communication error:", error)
+        with active_sessions_lock:
+            intentionally_terminated = session_id in terminating_sessions
 
-        safe_log_event(
-            "communication_error",
-            severity="ERROR",
-            outcome="failure",
-            source=client_address,
-            source_ip=addr[0],
-            session_id=session_id,
-            details={"error": str(error)}
-        )
+        if intentionally_terminated:
+            print("Session terminated by dashboard:", session_id)
+
+        else:
+            print("Client communication error:", error)
+
+            safe_log_event(
+                "communication_error",
+                severity="ERROR",
+                outcome="failure",
+                source=client_address,
+                source_ip=addr[0],
+                session_id=session_id,
+                details={"error": str(error)}
+            )
 
     finally:
+        with active_sessions_lock:
+            active_sessions.pop(session_id, None)
+            terminating_sessions.discard(session_id)
 
         try:
             conn.close()
-
         finally:
-
             try:
-
                 update_session(
                     session_id,
                     "Disconnected",
                     addr[0],
                     started_at
                 )
-
             except (OSError, ValueError) as error:
                 print("Session update error:", error)
 
@@ -428,19 +612,20 @@ def handle_client(conn, addr):
 
 def start_server():
 
-    server = socket.socket(
-        socket.AF_INET,
-        socket.SOCK_STREAM
-    )
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    server.setsockopt(
-        socket.SOL_SOCKET,
-        socket.SO_REUSEADDR,
-        1
+    command_stop_event.clear()
+
+    command_thread = threading.Thread(
+        target=command_processor,
+        daemon=True
     )
+    command_thread.start()
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
     try:
-
         server.bind((HOST, PORT))
         server.listen(5)
 
@@ -467,14 +652,11 @@ def start_server():
         )
 
         while True:
-
             conn, addr = server.accept()
 
-            # Check blocklist and rate limit before creating a session.
             allowed, reason = check_connection_allowed(addr[0])
 
             if not allowed:
-
                 print("Connection rejected:", addr, "-", reason)
 
                 safe_log_event(
@@ -489,9 +671,7 @@ def start_server():
                 conn.close()
                 continue
 
-            # Enforce maximum simultaneous clients.
             if not client_slots.acquire(blocking=False):
-
                 print("Maximum clients reached. Rejecting:", addr)
 
                 safe_log_event(
@@ -509,17 +689,14 @@ def start_server():
                 continue
 
             try:
-
                 client_thread = threading.Thread(
                     target=handle_client,
                     args=(conn, addr),
                     daemon=True
                 )
-
                 client_thread.start()
 
             except Exception as error:
-
                 conn.close()
                 client_slots.release()
 
@@ -528,15 +705,13 @@ def start_server():
                     severity="ERROR",
                     outcome="failure",
                     source=f"{addr[0]}:{addr[1]}",
-                    source_ip=addr[0],
                     details={"error": str(error)}
                 )
-
                 raise
 
     except KeyboardInterrupt:
-
         print("\nQ-SHIELD Server is shutting down...")
+        command_stop_event.set()
 
         safe_log_event(
             "server_shutdown",
@@ -545,7 +720,6 @@ def start_server():
         )
 
     finally:
-
         server.close()
 
 
