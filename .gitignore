@@ -35,3 +35,6 @@ data/commands.jsonl
 data/benchmarks.json
 # Runtime security event logs
 logs/
+
+*.qsk
+*.keystore
