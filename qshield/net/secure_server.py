@@ -1,4 +1,4 @@
-﻿import base64
+import base64
 import json
 import socket
 import threading
@@ -20,6 +20,22 @@ from qshield.net.handshake import (
     finalize_server_handshake,
 )
 from qshield.net.protocol import receive_message, send_message
+from qshield.net.rekey import (
+    REKEY_COMMIT_PREFIX,
+    REKEY_FINISHED_PREFIX,
+    REKEY_OFFER_PREFIX,
+    REKEY_RESPONSE_PREFIX,
+    RekeyCommit,
+    RekeyError,
+    RekeyResponse,
+    begin_server_rekey,
+    finalize_server_rekey,
+    make_control_frame,
+    parse_control_frame,
+    register_rekey_session,
+    take_pending_rekey,
+    unregister_rekey_session,
+)
 from qshield.net.server import (
     active_sessions,
     active_sessions_lock,
@@ -27,6 +43,7 @@ from qshield.net.server import (
     command_processor,
     command_stop_event,
     update_session,
+    acknowledge_command,
 )
 
 HOST = "127.0.0.1"
@@ -91,8 +108,13 @@ def handle_client(conn, address, server_private, trusted_client):
             )
 
             handshake_complete = True
+            register_rekey_session(session_id)
             with active_sessions_lock:
                 active_sessions[session_id] = conn
+            session_key = result.session_key
+            rekey_generation = 0
+            del result
+            del state
 
             update_session(
                 session_id, "Active", source_ip,
@@ -113,7 +135,7 @@ def handle_client(conn, address, server_private, trusted_client):
 
                 try:
                     plaintext = AES256GCM.decrypt(
-                        result.session_key,
+                        session_key,
                         encrypted_data,
                         associated_data=AAD,
                     )
@@ -136,9 +158,78 @@ def handle_client(conn, address, server_private, trusted_client):
                 if message == "/quit":
                     break
 
+                pending_rekey = take_pending_rekey(session_id)
+                if pending_rekey is not None:
+                    try:
+                        next_generation = rekey_generation + 1
+                        rekey_state = begin_server_rekey(
+                            session_key, server_private, generation=next_generation
+                        )
+                        send_message(
+                            conn,
+                            make_control_frame(REKEY_OFFER_PREFIX, rekey_state.offer.to_bytes()),
+                        )
+                        response_frame = receive_message(conn)
+                        rekey_response = RekeyResponse.from_bytes(
+                            parse_control_frame(response_frame, REKEY_RESPONSE_PREFIX)
+                        )
+                        rekey_result = finalize_server_rekey(
+                            rekey_state, rekey_response, trusted_client
+                        )
+                        send_message(
+                            conn,
+                            make_control_frame(REKEY_FINISHED_PREFIX, rekey_result.finished.to_bytes()),
+                        )
+                        commit_frame = receive_message(conn)
+                        rekey_commit = RekeyCommit.from_bytes(
+                            parse_control_frame(commit_frame, REKEY_COMMIT_PREFIX)
+                        )
+                        if not rekey_result.verify_client_commit(rekey_commit):
+                            raise RekeyError("Client key-confirmation MAC is invalid")
+
+                        # Switch only after both peers confirm the replacement key.
+                        session_key = rekey_result.session_key
+                        rekey_generation = next_generation
+                    except Exception as exc:
+                        try:
+                            acknowledge_command(
+                                pending_rekey,
+                                "failed",
+                                f"Re-key failed; closing session to prevent key desynchronisation: {exc}",
+                            )
+                        except Exception as ack_error:
+                            print("[RE-KEY ACK ERROR]", ack_error)
+                        try:
+                            log_event(
+                                "SESSION_REKEY_FAILED", "FAILED", source_ip, session_id,
+                                severity="CRITICAL", details=str(exc),
+                            )
+                        except Exception as log_error:
+                            print("[RE-KEY LOG ERROR]", log_error)
+                        raise ConnectionError("Authenticated re-key failed; session closed") from exc
+
+                    # Persistence/logging errors after key switch must not undo a completed
+                    # cryptographic exchange or desynchronise the client and server.
+                    try:
+                        acknowledge_command(
+                            pending_rekey,
+                            "executed",
+                            f"Authenticated post-quantum re-key completed (generation {rekey_generation})",
+                        )
+                    except Exception as ack_error:
+                        print("[RE-KEY ACK ERROR]", ack_error)
+                    try:
+                        log_event(
+                            "SESSION_REKEY_SUCCESS", "SUCCESS", source_ip, session_id,
+                            details=f"Authenticated ML-KEM re-key generation {rekey_generation} completed",
+                        )
+                    except Exception as log_error:
+                        print("[RE-KEY LOG ERROR]", log_error)
+                    print(f"[RE-KEY COMPLETE] {session_id[:8]} generation={rekey_generation}")
+
                 reply = f"Q-SHIELD received: {message}".encode("utf-8")
                 encrypted_reply = AES256GCM.encrypt(
-                    result.session_key, reply, associated_data=AAD
+                    session_key, reply, associated_data=AAD
                 )
                 send_message(
                     conn,
@@ -167,6 +258,13 @@ def handle_client(conn, address, server_private, trusted_client):
         else:
             print(f"[{session_id[:8]}] Session ended: {exc}")
     finally:
+        pending_commands = unregister_rekey_session(session_id)
+        for pending_command in pending_commands:
+            acknowledge_command(
+                pending_command,
+                "rejected",
+                "Session disconnected before the queued re-key could run",
+            )
         with active_sessions_lock:
             active_sessions.pop(session_id, None)
         try:
