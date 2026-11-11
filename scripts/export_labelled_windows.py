@@ -1,9 +1,5 @@
-"""Export per-source-IP feature windows from a PCAP with a supplied ground-truth label.
+"""Export timestamp-correct, labelled traffic windows from a PCAP."""
 
-Run this separately for each labelled capture, then combine CSV files for Member 1.
-The label is supplied by the operator based on the controlled lab scenario; it is not
-guessed by the detector.
-"""
 import argparse
 import csv
 from pathlib import Path
@@ -21,31 +17,105 @@ FIELDS = [
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Export labelled Q-SHIELD traffic feature windows"
+    )
     parser.add_argument("--pcap", required=True)
-    parser.add_argument("--label", required=True,
-                        choices=["normal", "port_scan", "syn_flood", "failed_login", "unknown"])
-    parser.add_argument("--output", default="data/labelled_windows.csv")
-    parser.add_argument("--window-seconds", type=int, default=10)
+    parser.add_argument(
+        "--label",
+        required=True,
+        choices=[
+            "normal", "port_scan", "syn_flood",
+            "failed_login", "unknown"
+        ],
+    )
+    parser.add_argument(
+        "--output",
+        default="data/labelled_windows.csv"
+    )
+    parser.add_argument(
+        "--window-seconds",
+        type=int,
+        default=10
+    )
+
     args = parser.parse_args()
 
-    extractor = SlidingWindowFeatureExtractor(args.window_seconds)
-    packet_count = replay_pcap(args.pcap, extractor.add_packet)
-    rows = extractor.snapshot()
+    if args.window_seconds <= 0:
+        parser.error("--window-seconds must be positive")
+
+    pcap_path = Path(args.pcap)
+    if not pcap_path.is_file():
+        parser.error(f"PCAP file not found: {pcap_path}")
+
+    extractor = SlidingWindowFeatureExtractor(
+        args.window_seconds
+    )
+
+    exported_rows = []
+    window_start = None
+    last_timestamp = None
+
+    def process_packet(record):
+        nonlocal window_start, last_timestamp
+
+        extractor.add_packet(record)
+        last_timestamp = record.timestamp
+
+        if window_start is None:
+            window_start = record.timestamp
+            return
+
+        if record.timestamp - window_start >= args.window_seconds:
+            exported_rows.extend(
+                extractor.snapshot(now=record.timestamp)
+            )
+            extractor.clear()
+            window_start = record.timestamp
+
+    packet_count = replay_pcap(
+        str(pcap_path),
+        process_packet
+    )
+
+    # Flush the final partial window using the PCAP timestamp.
+    if last_timestamp is not None:
+        exported_rows.extend(
+            extractor.snapshot(now=last_timestamp)
+        )
+
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    write_header = not output.exists() or output.stat().st_size == 0
-    with output.open("a", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=FIELDS)
+    write_header = (
+        not output.exists()
+        or output.stat().st_size == 0
+    )
+
+    with output.open(
+        "a",
+        newline="",
+        encoding="utf-8"
+    ) as handle:
+
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=FIELDS
+        )
+
         if write_header:
             writer.writeheader()
-        for row in rows:
+
+        for row in exported_rows:
             record = row.to_dict()
             record["label"] = args.label
             writer.writerow(record)
 
-    print(f"Read {packet_count} TCP packets; exported {len(rows)} windows to {output}")
+    print(f"PCAP: {pcap_path}")
+    print(f"TCP packets read: {packet_count}")
+    print(f"Feature windows exported: {len(exported_rows)}")
+    print(f"Label: {args.label}")
+    print(f"Output: {output}")
 
 
 if __name__ == "__main__":

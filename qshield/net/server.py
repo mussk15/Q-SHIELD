@@ -187,7 +187,7 @@ def check_connection_allowed(ip):
 # SESSION MANAGEMENT
 # --------------------------------------------------
 
-def update_session(session_id, status, remote_ip, started_at=None):
+def update_session(session_id, status, remote_ip, started_at=None, user_id=None):
     with session_lock:
         SESSIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
 
@@ -219,7 +219,11 @@ def update_session(session_id, status, remote_ip, started_at=None):
 
         session = {
             "session_id": session_id,
-            "user_id": "unauthenticated",
+            "user_id": (
+                user_id if user_id is not None
+                else existing.get("user_id", "unauthenticated") if existing
+                else "unauthenticated"
+            ),
             "remote_ip": remote_ip,
             "status": status,
             "started_at": (
@@ -228,6 +232,10 @@ def update_session(session_id, status, remote_ip, started_at=None):
                 else started_at or datetime.now(timezone.utc).isoformat()
             )
         }
+
+        # Preserve additional session metadata written by other components.
+        if existing and existing.get("key_fingerprint"):
+            session["key_fingerprint"] = existing["key_fingerprint"]
 
         if status == "Disconnected":
             session["ended_at"] = datetime.now(timezone.utc).isoformat()
