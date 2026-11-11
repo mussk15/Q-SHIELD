@@ -360,7 +360,8 @@ def evidence_page() -> None:
 def benchmarks_page() -> None:
     page_header("Cryptographic benchmarks", "Display measured algorithm sizes and timings supplied by Member 1.")
     if not BENCHMARKS_FILE.exists():
-        st.info("No benchmark file found. Member 1 should provide data/benchmarks.json with measured results.")
+        st.info("No benchmark file found. Generate real measurements from the project root with: python -m benchmarks.bench_pq_vs_classic --iterations 20 --output data/benchmarks.json")
+        st.caption("The benchmark runner measures this machine. Do not copy illustrative or synthetic timings into the dashboard.")
         return
     try:
         data = json.loads(BENCHMARKS_FILE.read_text(encoding="utf-8"))
