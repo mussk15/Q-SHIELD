@@ -1,0 +1,30 @@
+{
+  "model": "IsolationForest",
+  "feature_columns": [
+    "window_seconds",
+    "packet_count",
+    "connection_attempts",
+    "syn_count",
+    "syn_ack_count",
+    "rst_count",
+    "half_open_syns",
+    "failed_handshakes",
+    "distinct_dst_ports",
+    "distinct_dst_ips",
+    "bytes_total",
+    "message_rate"
+  ],
+  "training_normal_windows": 17,
+  "labelled_attack_windows": 21,
+  "ignored_unknown_windows": 0,
+  "contamination": 0.05,
+  "evaluation": {
+    "training_normal_windows": 11,
+    "testing_normal_windows": 6,
+    "testing_attack_windows": 21,
+    "precision": 0.0,
+    "recall": 0.0,
+    "f1": 0.0
+  },
+  "warning": "Metrics depend on the supplied labelled dataset; this model is a triage aid, not proof of an attack."
+}
