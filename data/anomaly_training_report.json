@@ -24,7 +24,13 @@
     "testing_attack_windows": 21,
     "precision": 0.0,
     "recall": 0.0,
-    "f1": 0.0
+    "f1": 0.0,
+    "confusion_matrix": {
+      "true_positives": 0,
+      "false_positives": 1,
+      "true_negatives": 5,
+      "false_negatives": 21
+    }
   },
   "warning": "Metrics depend on the supplied labelled dataset; this model is a triage aid, not proof of an attack."
 }

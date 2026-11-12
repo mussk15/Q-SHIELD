@@ -278,15 +278,16 @@ def update_session(session_id, status, remote_ip, started_at=None, user_id=None)
 # COMMAND RESULTS AND ACKNOWLEDGEMENTS
 # --------------------------------------------------
 
-def load_processed_command_ids():
+def load_processed_command_ids(results_file=None):
     """Load command IDs already acknowledged by this server."""
 
     processed = set()
+    target_file = Path(results_file) if results_file else COMMAND_RESULTS_FILE
 
-    if not COMMAND_RESULTS_FILE.exists():
+    if not target_file.exists():
         return processed
 
-    with COMMAND_RESULTS_FILE.open("r", encoding="utf-8") as file:
+    with target_file.open("r", encoding="utf-8") as file:
         for line in file:
             if not line.strip():
                 continue
@@ -306,7 +307,7 @@ def load_processed_command_ids():
     return processed
 
 
-def acknowledge_command(command, status, message):
+def acknowledge_command(command, status, message, results_file=None):
     """Append the result of a dashboard command."""
 
     result = {
@@ -318,10 +319,11 @@ def acknowledge_command(command, status, message):
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
-    COMMAND_RESULTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    target_file = Path(results_file) if results_file else COMMAND_RESULTS_FILE
+    target_file.parent.mkdir(parents=True, exist_ok=True)
 
     with command_results_lock:
-        with COMMAND_RESULTS_FILE.open("a", encoding="utf-8") as file:
+        with target_file.open("a", encoding="utf-8") as file:
             file.write(json.dumps(result, ensure_ascii=False) + "\n")
             file.flush()
             os.fsync(file.fileno())
@@ -343,7 +345,7 @@ def acknowledge_command(command, status, message):
     return result
 
 
-def execute_command(command):
+def execute_command(command, results_file=None, sessions_file=None):
     """Validate and execute one dashboard command."""
 
     if not isinstance(command, dict):
@@ -361,7 +363,8 @@ def execute_command(command):
         acknowledge_command(
             command,
             "rejected",
-            "Invalid or missing session ID"
+            "Invalid or missing session ID",
+            results_file=results_file,
         )
         return
 
@@ -369,7 +372,8 @@ def execute_command(command):
         acknowledge_command(
             command,
             "rejected",
-            "Unsupported command type"
+            "Unsupported command type",
+            results_file=results_file,
         )
         return
 
@@ -379,13 +383,15 @@ def execute_command(command):
             acknowledge_command(
                 command,
                 "rejected",
-                "Session is not an active secure session or already has a re-key request pending"
+                "Session is not an active secure session or already has a re-key request pending",
+                results_file=results_file,
             )
             return
         acknowledge_command(
             command,
             "queued",
-            "Accepted; authenticated re-key will run at the next client message boundary"
+            "Accepted; authenticated re-key will run at the next client message boundary",
+            results_file=results_file,
         )
         return
 
@@ -394,45 +400,91 @@ def execute_command(command):
         target_socket = active_sessions.get(session_id)
 
         if target_socket is None:
-            rejection_message = "Session is not currently connected to this server"
+            # Check if this session was previously recorded in sessions.jsonl
+            active_s_file = Path(sessions_file) if sessions_file else SESSIONS_FILE
+            is_disconnected = False
+            if active_s_file.exists():
+                try:
+                    with active_s_file.open("r", encoding="utf-8") as file:
+                        for line in file:
+                            if not line.strip():
+                                continue
+                            try:
+                                record = json.loads(line)
+                                if isinstance(record, dict) and record.get("session_id") == session_id:
+                                    if record.get("status") == "Disconnected":
+                                        is_disconnected = True
+                            except json.JSONDecodeError:
+                                pass
+                except OSError:
+                    pass
+
+            if is_disconnected:
+                acknowledge_command(
+                    command,
+                    "already_disconnected",
+                    "Session is already disconnected",
+                    results_file=results_file,
+                )
+            else:
+                acknowledge_command(
+                    command,
+                    "rejected",
+                    "Session is not currently connected to this server",
+                    results_file=results_file,
+                )
+            return
 
         elif session_id in terminating_sessions:
-            rejection_message = "Session termination is already in progress"
+            acknowledge_command(
+                command,
+                "rejected",
+                "Session termination is already in progress",
+                results_file=results_file,
+            )
+            return
 
-        else:
-            rejection_message = None
-            terminating_sessions.add(session_id)
-
-    if rejection_message is not None:
-        acknowledge_command(command, "rejected", rejection_message)
-        return
-
-    try:
-        target_socket.shutdown(socket.SHUT_RDWR)
-    except OSError:
-        pass
+        terminating_sessions.add(session_id)
 
     try:
-        target_socket.close()
-    except OSError:
-        pass
+        try:
+            target_socket.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
 
-    acknowledge_command(
-        command,
-        "executed",
-        "Session termination requested by dashboard"
-    )
+        try:
+            target_socket.close()
+        except OSError:
+            pass
 
-    print("Session termination executed:", session_id)
+        acknowledge_command(
+            command,
+            "executed",
+            "Session termination requested by dashboard",
+            results_file=results_file,
+        )
+        print("Session termination executed:", session_id)
+    except Exception as exc:
+        with active_sessions_lock:
+            terminating_sessions.discard(session_id)
+        acknowledge_command(
+            command,
+            "failed",
+            f"Failed to terminate session socket: {exc}",
+            results_file=results_file,
+        )
 
 
-def command_processor():
+def command_processor(commands_file=None, results_file=None, poll_interval=None):
     """Continuously check the dashboard's append-only command queue."""
 
     print("Dashboard command processor started.")
+    active_commands_file = Path(commands_file) if commands_file else COMMANDS_FILE
+    active_results_file = Path(results_file) if results_file else COMMAND_RESULTS_FILE
+    active_interval = poll_interval if poll_interval is not None else COMMAND_POLL_INTERVAL
 
     try:
-        processed_ids = load_processed_command_ids()
+        processed_ids = load_processed_command_ids(results_file=active_results_file)
     except OSError as error:
         print("Unable to load processed command IDs:", error)
         processed_ids = set()
@@ -440,9 +492,9 @@ def command_processor():
     while not command_stop_event.is_set():
 
         try:
-            if COMMANDS_FILE.exists():
+            if active_commands_file.exists():
 
-                with COMMANDS_FILE.open("r", encoding="utf-8") as file:
+                with active_commands_file.open("r", encoding="utf-8") as file:
                     for line in file:
 
                         if not line.strip():
@@ -468,13 +520,13 @@ def command_processor():
                         if command.get("status") != "queued":
                             continue
 
-                        execute_command(command)
+                        execute_command(command, results_file=active_results_file)
                         processed_ids.add(command_id)
 
         except (OSError, RuntimeError, ValueError) as error:
             print("Command processor error:", error)
 
-        command_stop_event.wait(COMMAND_POLL_INTERVAL)
+        command_stop_event.wait(active_interval)
 
 
 # --------------------------------------------------

@@ -8,10 +8,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import threading
 import time
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from qshield.monitor.alerts import AlertManager
 from qshield.monitor.features import SlidingWindowFeatureExtractor

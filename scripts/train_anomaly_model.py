@@ -10,8 +10,13 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import joblib
 
@@ -21,7 +26,6 @@ from qshield.monitor.anomaly import (
     evaluate_labelled_csv,
 )
 
-ROOT = Path(__file__).resolve().parents[1]
 KNOWN_ATTACK_LABELS = {"port_scan", "syn_flood", "failed_login", "replay", "tamper", "attack"}
 
 
@@ -117,6 +121,9 @@ def main() -> None:
     print(f"  Precision: {metrics['precision']:.3f}")
     print(f"  Recall:    {metrics['recall']:.3f}")
     print(f"  F1-score:  {metrics['f1']:.3f}")
+    if "confusion_matrix" in metrics:
+        cm = metrics["confusion_matrix"]
+        print(f"  Confusion: TP={cm['true_positives']}, FP={cm['false_positives']}, TN={cm['true_negatives']}, FN={cm['false_negatives']}")
     print(f"Model saved:  {args.output}")
     print(f"Report saved: {args.report}")
 

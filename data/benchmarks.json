@@ -1,0 +1,46 @@
+[
+  {
+    "algorithm": "ML-KEM-768",
+    "family": "post-quantum",
+    "iterations": 20,
+    "keygen_ms": 0.138685,
+    "encaps_ms": 0.16727,
+    "decaps_ms": 0.17086,
+    "public_key_bytes": 1184,
+    "secret_key_bytes": 2400,
+    "ciphertext_bytes": 1088
+  },
+  {
+    "algorithm": "ECDH-P256",
+    "family": "classical",
+    "iterations": 20,
+    "keygen_ms": 0.1968175,
+    "encaps_ms": 0.15539,
+    "decaps_ms": 0.1304,
+    "public_key_bytes": 33,
+    "secret_key_bytes": 32,
+    "ciphertext_bytes": 0
+  },
+  {
+    "algorithm": "ML-DSA-65",
+    "family": "post-quantum",
+    "iterations": 20,
+    "keygen_ms": 0.299165,
+    "sign_ms": 1.006215,
+    "verify_ms": 0.266345,
+    "public_key_bytes": 1952,
+    "secret_key_bytes": 4032,
+    "signature_bytes": 3309
+  },
+  {
+    "algorithm": "ECDSA-P256",
+    "family": "classical",
+    "iterations": 20,
+    "keygen_ms": 0.04483,
+    "sign_ms": 0.78399,
+    "verify_ms": 0.177335,
+    "public_key_bytes": 33,
+    "secret_key_bytes": 32,
+    "signature_bytes": 70
+  }
+]

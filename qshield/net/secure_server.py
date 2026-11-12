@@ -37,11 +37,13 @@ from qshield.net.rekey import (
     unregister_rekey_session,
 )
 from qshield.net.server import (
+    DATA_DIR,
     active_sessions,
     active_sessions_lock,
     check_connection_allowed,
     command_processor,
     command_stop_event,
+    terminating_sessions,
     update_session,
     acknowledge_command,
 )
@@ -49,7 +51,7 @@ from qshield.net.server import (
 HOST = "127.0.0.1"
 PORT = 5001
 AAD = b"QSHIELD_APP_V1"
-EVENT_FILE = Path("data/events.jsonl")
+EVENT_FILE = DATA_DIR / "events.jsonl"
 EVENT_LOCK = threading.Lock()
 
 
@@ -267,11 +269,20 @@ def handle_client(conn, address, server_private, trusted_client):
             )
         with active_sessions_lock:
             active_sessions.pop(session_id, None)
+            was_terminated = session_id in terminating_sessions
+            terminating_sessions.discard(session_id)
         try:
             update_session(session_id, "Disconnected", source_ip)
         except (OSError, ValueError) as exc:
             print("Unable to update disconnected session:", exc)
-        log_event("CLIENT_DISCONNECTED", "SUCCESS", source_ip, session_id)
+        if was_terminated:
+            log_event(
+                "SESSION_TERMINATED", "SUCCESS", source_ip, session_id,
+                severity="WARNING",
+                details="Session terminated by server command",
+            )
+        else:
+            log_event("CLIENT_DISCONNECTED", "SUCCESS", source_ip, session_id)
         print(f"Client disconnected: {address}")
 
 

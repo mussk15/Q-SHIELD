@@ -85,18 +85,31 @@ class IsolationForestAnomalyDetector:
         return [self.predict_one(sample) for sample in samples]
 
     def evaluate(self, samples: Iterable[Mapping[str, Any] | Any],
-                 expected_anomalies: Iterable[bool]) -> dict[str, float]:
+                 expected_anomalies: Iterable[bool],
+                 return_confusion_matrix: bool = False) -> dict[str, Any]:
         """Return precision, recall and F1 against labelled test windows."""
         results = self.predict(samples)
         expected = [bool(value) for value in expected_anomalies]
         if len(results) != len(expected) or not expected:
             raise ValueError("samples and expected_anomalies must have equal non-zero lengths")
         predicted = [result.is_anomaly for result in results]
-        return {
+        metrics: dict[str, Any] = {
             "precision": float(precision_score(expected, predicted, zero_division=0)),
             "recall": float(recall_score(expected, predicted, zero_division=0)),
             "f1": float(f1_score(expected, predicted, zero_division=0)),
         }
+        if return_confusion_matrix:
+            tp = sum(1 for e, p in zip(expected, predicted) if e and p)
+            fp = sum(1 for e, p in zip(expected, predicted) if not e and p)
+            tn = sum(1 for e, p in zip(expected, predicted) if not e and not p)
+            fn = sum(1 for e, p in zip(expected, predicted) if e and not p)
+            metrics["confusion_matrix"] = {
+                "true_positives": tp,
+                "false_positives": fp,
+                "true_negatives": tn,
+                "false_negatives": fn,
+            }
+        return metrics
 
 
 def evaluate_labelled_csv(
@@ -147,7 +160,7 @@ def evaluate_labelled_csv(
     detector = IsolationForestAnomalyDetector(
         contamination=contamination, random_state=random_state
     ).fit(training)
-    metrics = detector.evaluate(testing, expected)
+    metrics = detector.evaluate(testing, expected, return_confusion_matrix=True)
     return {
         "training_normal_windows": len(training),
         "testing_normal_windows": len(held_out_normal),

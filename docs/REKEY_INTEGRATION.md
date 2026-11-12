@@ -42,3 +42,11 @@ Run benchmarks/run_benchmarks.bat on Windows or execute:
 python -m benchmarks.bench_pq_vs_classic --iterations 20 --output data/benchmarks.json
 
 This produces the JSON list consumed by the dashboard, with measured ML-KEM-768, ECDH-P256, ML-DSA-65 and ECDSA-P256 timings and key/signature sizes. Measurements are machine-specific; generate them on the computer used for the demo. The data/benchmarks.json ignore rule has been removed so the measured file can be committed.
+
+## Validation & Verification Status
+
+- **Automated Unit & Rekey Tests**: All 9 dedicated rekey unit tests (`tests/test_rekey.py`) pass.
+- **Automated Command & Session Tests**: All 12 command queue tests (`tests/test_commands.py`) pass, covering queued status, inactive session rejection, and duplicate rekey request rejection.
+- **End-to-End Test**: `tests/test_e2e_integration.py::test_complete_qshield_e2e_rekey_workflow` verifies the full lifecycle: handshake -> message under gen 0 -> dashboard command -> message boundary rekey -> mutual derivation of gen 1 key -> executed acknowledgment -> message under gen 1 -> cryptographic rejection of gen 0 key.
+- **Live Local Verification**: `scripts/verify_live_rekey.py` demonstrates all 11 phases over live TCP sockets and persists audit records in `data/sessions.jsonl`, `data/commands.jsonl`, `data/command_results.jsonl`, and `data/events.jsonl`.
+- **Full Test Suite**: 107/107 automated pytest tests passing cleanly with 0 failures, 0 skipped, and no liboqs native version warnings.

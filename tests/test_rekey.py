@@ -128,7 +128,7 @@ def test_force_rekey_dashboard_command_is_queued_for_active_secure_session(monke
     register_rekey_session(session_id)
     monkeypatch.setattr(
         server_module, "acknowledge_command",
-        lambda cmd, status, message: results.append((status, message)),
+        lambda cmd, status, message, results_file=None: results.append((status, message)),
     )
     try:
         server_module.execute_command(command)

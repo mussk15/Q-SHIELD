@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 ALLOWED_COMMANDS = {"kill_session", "force_rekey"}
+QUEUE_LOCK = threading.Lock()
 
 
 def default_path() -> Path:
@@ -46,8 +48,9 @@ def enqueue_command(
         "reason": str(reason).strip()[:500],
         "status": "queued",
     }
-    with file_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(item, ensure_ascii=False) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
+    with QUEUE_LOCK:
+        with file_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(item, ensure_ascii=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
     return item

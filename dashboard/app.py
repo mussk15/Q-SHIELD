@@ -34,6 +34,7 @@ ALERTS_FILE = DATA_DIR / "alerts.jsonl"
 SESSIONS_FILE = DATA_DIR / "sessions.jsonl"
 BLOCKLIST_FILE = DATA_DIR / "blocklist.json"
 COMMANDS_FILE = DATA_DIR / "commands.jsonl"
+COMMAND_RESULTS_FILE = DATA_DIR / "command_results.jsonl"
 EVIDENCE_FILE = DATA_DIR / "evidence.jsonl"
 BENCHMARKS_FILE = DATA_DIR / "benchmarks.json"
 
@@ -141,6 +142,40 @@ def sessions_frame(records: list[dict[str, Any]]) -> pd.DataFrame:
         "Key fingerprint": value(row, "key_fingerprint", "fingerprint", default="Not provided"),
     } for row in records]
     return pd.DataFrame(rows, columns=["Session ID", "User", "Remote IP", "Status", "Started", "Key fingerprint"])
+
+
+def commands_frame(commands: list[dict[str, Any]], results: list[dict[str, Any]]) -> pd.DataFrame:
+    results_map: dict[str, dict[str, Any]] = {}
+    for res in results:
+        cid = str(res.get("command_id", "")).strip()
+        if cid:
+            results_map[cid] = res
+
+    rows = []
+    for cmd in reversed(commands):
+        cid = str(cmd.get("command_id", ""))
+        res = results_map.get(cid)
+        status = res.get("status") if res else cmd.get("status", "queued")
+        message = res.get("message") if res else "Pending server processing"
+        rows.append({
+            "Command ID": cid[:8] + "..." if len(cid) > 12 else cid,
+            "Target session": value(cmd, "session_id", default=""),
+            "Command type": value(cmd, "command", default=""),
+            "Queue timestamp": value(cmd, "timestamp", default=""),
+            "Execution status": str(status).upper(),
+            "Server response / Reason": message,
+        })
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "Command ID",
+            "Target session",
+            "Command type",
+            "Queue timestamp",
+            "Execution status",
+            "Server response / Reason",
+        ]
+    )
 
 
 def page_header(title: str, subtitle: str) -> None:
@@ -335,6 +370,14 @@ def response_page(sessions: pd.DataFrame, blocked: list[dict[str, Any]]) -> None
             except (ValueError, OSError, RuntimeError) as exc:
                 st.error(str(exc))
 
+        st.markdown("### Server command history & acknowledgements")
+        commands_list, _ = read_jsonl(COMMANDS_FILE)
+        results_list, _ = read_jsonl(COMMAND_RESULTS_FILE)
+        if commands_list:
+            st.dataframe(commands_frame(commands_list, results_list), width="stretch", hide_index=True)
+        else:
+            st.info("No server commands queued yet.")
+
 
 def evidence_page() -> None:
     page_header("Evidence integrity", "Verify the SHA-256 hash chain for incident response records.")
@@ -387,53 +430,57 @@ def benchmarks_page() -> None:
 
 
 # -------------------- APPLICATION ENTRY --------------------
-if not login():
-    st.stop()
+def run_dashboard() -> None:
+    if not login():
+        st.stop()
 
-with st.sidebar:
-    st.markdown(
-        '<div class="qs-brand"><div class="qs-mark">盾</div><div>'
-        '<div class="qs-name">Q-SHIELD</div><div class="qs-caption">QUANTUM SECURITY CONSOLE</div>'
-        '</div></div>',
-        unsafe_allow_html=True,
-    )
-    st.caption("WORKSPACE")
-    selected_page = st.radio(
-        "Navigate",
-        ["Overview", "Alerts", "Sessions", "Response", "Evidence", "Benchmarks"],
-        label_visibility="collapsed",
-    )
-    st.divider()
-    st.caption("DATA DIRECTORY")
-    st.code(str(DATA_DIR), language=None)
-    if st.button("Sign out", width="stretch"):
-        st.session_state["logged_in"] = False
-        st.rerun()
+    with st.sidebar:
+        st.markdown(
+            '<div class="qs-brand"><div class="qs-mark">盾</div><div>'
+            '<div class="qs-name">Q-SHIELD</div><div class="qs-caption">QUANTUM SECURITY CONSOLE</div>'
+            '</div></div>',
+            unsafe_allow_html=True,
+        )
+        st.caption("WORKSPACE")
+        selected_page = st.radio(
+            "Navigate",
+            ["Overview", "Alerts", "Sessions", "Response", "Evidence", "Benchmarks"],
+            label_visibility="collapsed",
+        )
+        st.divider()
+        st.caption("DATA DIRECTORY")
+        st.code(str(DATA_DIR), language=None)
+        if st.button("Sign out", width="stretch"):
+            st.session_state["logged_in"] = False
+            st.rerun()
+
+    events, events_errors = read_jsonl(EVENTS_FILE)
+    alert_records, alerts_errors = read_jsonl(ALERTS_FILE)
+    session_records, sessions_errors = read_jsonl(SESSIONS_FILE)
+    alerts_data = alerts_frame(alert_records)
+    sessions_data = sessions_frame(session_records)
+    blocklist_data = load_blocklist(BLOCKLIST_FILE)
+    blocked_entries = blocklist_data.get("blocked_ips", [])
+
+    if selected_page == "Overview":
+        page_header("Security overview", "A unified view of secure communications, detections and response posture.")
+        overview(events, alerts_data, sessions_data, blocked_entries)
+    elif selected_page == "Alerts":
+        alerts_page(alerts_data)
+    elif selected_page == "Sessions":
+        sessions_page(sessions_data)
+    elif selected_page == "Response":
+        response_page(sessions_data, blocked_entries)
+    elif selected_page == "Evidence":
+        evidence_page()
+    elif selected_page == "Benchmarks":
+        benchmarks_page()
+
+    if events_errors or alerts_errors or sessions_errors:
+        st.warning(f"Malformed JSONL records skipped: events={events_errors}, alerts={alerts_errors}, sessions={sessions_errors}.")
+
+    st.markdown('<div class="qs-foot">Q-SHIELD STUDENT PROTOTYPE · SYNTHETIC DATA · AUTHORISED LAB USE ONLY</div>', unsafe_allow_html=True)
 
 
-events, events_errors = read_jsonl(EVENTS_FILE)
-alert_records, alerts_errors = read_jsonl(ALERTS_FILE)
-session_records, sessions_errors = read_jsonl(SESSIONS_FILE)
-alerts_data = alerts_frame(alert_records)
-sessions_data = sessions_frame(session_records)
-blocklist_data = load_blocklist(BLOCKLIST_FILE)
-blocked_entries = blocklist_data.get("blocked_ips", [])
-
-if selected_page == "Overview":
-    page_header("Security overview", "A unified view of secure communications, detections and response posture.")
-    overview(events, alerts_data, sessions_data, blocked_entries)
-elif selected_page == "Alerts":
-    alerts_page(alerts_data)
-elif selected_page == "Sessions":
-    sessions_page(sessions_data)
-elif selected_page == "Response":
-    response_page(sessions_data, blocked_entries)
-elif selected_page == "Evidence":
-    evidence_page()
-elif selected_page == "Benchmarks":
-    benchmarks_page()
-
-if events_errors or alerts_errors or sessions_errors:
-    st.warning(f"Malformed JSONL records skipped: events={events_errors}, alerts={alerts_errors}, sessions={sessions_errors}.")
-
-st.markdown('<div class="qs-foot">Q-SHIELD STUDENT PROTOTYPE · SYNTHETIC DATA · AUTHORISED LAB USE ONLY</div>', unsafe_allow_html=True)
+if __name__ == "__main__":
+    run_dashboard()

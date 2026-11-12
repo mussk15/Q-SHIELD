@@ -5,6 +5,10 @@ other QShield modules do not each implement their own OQS availability logic.
 """
 
 from importlib import import_module, metadata
+import os
+from pathlib import Path
+import platform
+import sys
 from types import ModuleType
 
 KEM_ALGORITHM = "ML-KEM-768"
@@ -13,6 +17,42 @@ SIGNATURE_ALGORITHM = "ML-DSA-65"
 
 class BackendUnavailableError(RuntimeError):
     """Raised when the required post-quantum backend is unavailable."""
+
+
+def _ensure_windows_dll_path() -> None:
+    """Ensure Windows Python runtime can discover native liboqs DLLs."""
+    if platform.system() != "Windows":
+        return
+
+    candidate_dirs = [
+        os.environ.get("OQS_INSTALL_PATH"),
+        r"C:\liboqs\build-0160\bin\Release",
+        r"C:\liboqs\build-0160\bin",
+        str(Path.home() / "_oqs" / "bin"),
+        str(Path.home() / "_oqs"),
+        r"C:\liboqs\build\bin\Release",
+        r"C:\liboqs\build\bin",
+    ]
+
+    for directory in reversed(candidate_dirs):
+        if directory and os.path.isdir(directory):
+            if hasattr(os, "add_dll_directory"):
+                try:
+                    os.add_dll_directory(directory)
+                except OSError:
+                    pass
+            current_path = os.environ.get("PATH", "")
+            if directory not in current_path:
+                os.environ["PATH"] = directory + os.pathsep + current_path
+
+    if "OQS_INSTALL_PATH" not in os.environ:
+        build_0160 = Path(r"C:\liboqs\build-0160")
+        if (build_0160 / "bin" / "Release" / "oqs.dll").exists() or (build_0160 / "bin" / "oqs.dll").exists():
+            os.environ["OQS_INSTALL_PATH"] = str(build_0160)
+        else:
+            home_oqs = Path.home() / "_oqs"
+            if (home_oqs / "bin" / "oqs.dll").exists():
+                os.environ["OQS_INSTALL_PATH"] = str(home_oqs)
 
 
 def get_oqs() -> ModuleType:
@@ -25,6 +65,7 @@ def get_oqs() -> ModuleType:
         BackendUnavailableError: If the binding cannot load or either
             configured algorithm is not enabled in the native liboqs build.
     """
+    _ensure_windows_dll_path()
     try:
         oqs = import_module("oqs")
     except (ImportError, OSError, RuntimeError) as exc:

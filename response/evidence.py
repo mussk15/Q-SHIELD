@@ -8,11 +8,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 GENESIS_HASH = "0" * 64
+EVIDENCE_LOCK = threading.Lock()
 
 
 def default_path() -> Path:
@@ -91,24 +93,25 @@ def append_event(
     file_path = Path(path) if path is not None else default_path()
     file_path.parent.mkdir(parents=True, exist_ok=True)
 
-    valid, message = verify_chain(file_path)
-    if not valid:
-        raise RuntimeError(f"Cannot append to invalid evidence chain: {message}")
+    with EVIDENCE_LOCK:
+        valid, message = verify_chain(file_path)
+        if not valid:
+            raise RuntimeError(f"Cannot append to invalid evidence chain: {message}")
 
-    records = read_records(file_path)
-    previous_hash = records[-1]["hash"] if records else GENESIS_HASH
-    unsigned_record = {
-        "sequence": len(records) + 1,
-        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "event_type": clean_event_type,
-        "actor": str(actor).strip()[:80],
-        "details": details or {},
-        "prev_hash": previous_hash,
-    }
-    record = {**unsigned_record, "hash": _record_hash(unsigned_record)}
+        records = read_records(file_path)
+        previous_hash = records[-1]["hash"] if records else GENESIS_HASH
+        unsigned_record = {
+            "sequence": len(records) + 1,
+            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "event_type": clean_event_type,
+            "actor": str(actor).strip()[:80],
+            "details": details or {},
+            "prev_hash": previous_hash,
+        }
+        record = {**unsigned_record, "hash": _record_hash(unsigned_record)}
 
-    with file_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, sort_keys=True, ensure_ascii=False) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
+        with file_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, sort_keys=True, ensure_ascii=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
     return record
