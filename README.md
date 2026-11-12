@@ -192,11 +192,23 @@ python scripts\run_sensor.py --pcap data\port_scan.pcapng
 python scripts\run_sensor.py --follow-events
 ```
 
-### 5.5 Running the Streamlit Security Operations Dashboard
+### 5.5 Running the Streamlit Quantum Security Operations Dashboard
 ```powershell
 python -m streamlit run dashboard\app.py --server.port 8502
 ```
-Navigate to `http://localhost:8502` and log in with your credentials.
+Navigate to `http://localhost:8502` and log in with your credentials (`analyst` / configured password).
+
+The unified dashboard provides 10 interconnected operational interfaces without needing separate terminals:
+1. **Overview**: Executive KPI metrics, recent activity feed, threat severity distribution, and interactive architecture diagrams.
+2. **Server Control**: Start, stop, and monitor the post-quantum TCP server (port 5001), inspect port conflicts, and manage active sessions.
+3. **Client Console**: Connect client using ML-KEM-768/ML-DSA-65 handshake, exchange AES-256-GCM encrypted messages, and view real-time server replies.
+4. **File Transfer**: AES-256-GCM chunked encrypted file transfer, automatic file receiver management (port 5002), SHA-256 integrity verification, and browser for `data/received_files/`.
+5. **Network Monitoring**: PCAP packet inspection (`normal.pcapng`, `port_scan.pcapng` or upload) through feature extractor and IDS, live Scapy packet sniffing, and network interface inspector.
+6. **Threats & Alerts**: Unified view of rule-based and Isolation Forest alerts, severity filtering, search, and full alert details.
+7. **Sessions**: Active socket sessions, disconnected session archive, re-key generation counters, and cryptographic lifecycle details.
+8. **Incident Response**: Analyst containment console with `force_rekey`, `kill_session`, simulated IP blocklist, and live command result tracking.
+9. **Evidence & Audit**: Cryptographic SHA-256 hash-chain verification tool (`verify_chain`) ensuring tamper-evident audit records in `data/evidence.jsonl`.
+10. **Benchmarks & System Status**: NIST PQC vs classical ECDH/ECDSA benchmark timings and key sizes, subsystem health diagnostics, and threshold configuration.
 
 ---
 
@@ -229,7 +241,7 @@ Run the live interactive re-key verification script:
 python scripts/verify_live_rekey.py
 ```
 
-### Test Suite Breakdown (107 Tests Total - 100% Passing):
+### Test Suite Breakdown (114 Tests Total - 100% Passing):
 - `tests/test_kem.py`: ML-KEM-768 encapsulation, decapsulation, invalid key rejection (4 tests)
 - `tests/test_sig.py`: ML-DSA-65 signing, verification, tampering rejection (6 tests)
 - `tests/test_kdf.py`: HKDF-SHA256 deterministic key derivation and context separation (6 tests)
@@ -251,7 +263,8 @@ python scripts/verify_live_rekey.py
 - `tests/test_event_logging.py`: Security event logging format and thread safety (4 tests)
 - `tests/test_crypto_backend.py`: OQS backend algorithm verification (2 tests)
 - `tests/test_benchmark.py`: Cryptographic algorithm benchmarking smoke tests (2 tests)
-- `tests/test_dashboard.py`: Streamlit dashboard headless page rendering and dataframes (6 tests)
+- `tests/test_dashboard.py`: Streamlit dashboard headless page rendering across all 10 unified views (6 tests)
+- `tests/test_services.py`: Managed Server, Client, File Transfer, Monitor, and ServiceManager services (7 tests)
 - `tests/test_e2e_integration.py`: Complete End-to-End integration across all subsystems, including full rekey workflow (2 tests)
 
 ---

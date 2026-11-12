@@ -25,7 +25,8 @@ This report documents verified test results from the automated test suite and in
 | T17 | Authenticated in-band post-quantum re-key protocol | Ephemeral ML-KEM-768 offer signed with ML-DSA-65, client response, Finished/Commit MAC confirmations | Both endpoints derive and confirm identical replacement key; tampered/replayed offers rejected | PASS | `tests/test_rekey.py` (9/9 tests passed) |
 | T18 | Complete End-to-End integration workflow | Demonstrates handshake, messaging, file transfer, IDS alerts, command execution, and shutdown | Client/server PQ handshake, encrypted echo, file transfer, IDS alert, kill command execution verified | PASS | `tests/test_e2e_integration.py::test_complete_qshield_e2e_workflow` |
 | T19 | End-to-End in-band re-key integration workflow | Validates handshake, message boundary rekeying, generation 1 key derivation, acknowledgement, old-key rejection | Both sides agree on gen 1 key; status `executed` logged; old key fails tag verification | PASS | `tests/test_e2e_integration.py::test_complete_qshield_e2e_rekey_workflow`, `scripts/verify_live_rekey.py` |
-| T20 | Streamlit dashboard headless validation | Dashboard pages load without unhandled layout or rendering exceptions | Overview, Alerts, Sessions, Response, Evidence, Benchmarks render cleanly | PASS | `tests/test_dashboard.py` (6/6 tests passed) |
+| T20 | Streamlit dashboard headless validation | Dashboard pages load without unhandled layout or rendering exceptions | Overview, Server, Client, Files, Network, Alerts, Sessions, Response, Evidence, Benchmarks render cleanly | PASS | `tests/test_dashboard.py` (6/6 tests passed) |
+| T21 | Service layer integration & lifecycle | Managed Server, Client, File Transfer, and Monitor background services start, execute, and shutdown cleanly | All singleton services verified; end-to-end messaging, file transfer, and PCAP analysis succeed | PASS | `tests/test_services.py` (7/7 tests passed) |
 
 ---
 
@@ -58,8 +59,8 @@ This report documents verified test results from the automated test suite and in
 
 ## 3. Summary of Test Execution
 
-- **Total Automated Test Cases Executed**: 107 unit, functional, security, and integration tests
-- **Tests Passed**: 107 (100%)
+- **Total Automated Test Cases Executed**: 114 unit, functional, security, and integration tests
+- **Tests Passed**: 114 (100%)
 - **Tests Failed**: 0 (0%)
 - **Tests Skipped**: 0 (0%)
 - **Live Integration Verification**: 11/11 phases passed via `scripts/verify_live_rekey.py`

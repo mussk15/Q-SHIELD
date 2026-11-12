@@ -131,7 +131,18 @@ def test_dashboard_headless_page_navigation():
     assert not at.exception
 
     # Test pages via sidebar radio
-    pages = ["Overview", "Alerts", "Sessions", "Response", "Evidence", "Benchmarks"]
+    pages = [
+        "Overview",
+        "Secure Communication",
+        "File Transfer",
+        "Sessions",
+        "Network Monitoring",
+        "Threat Alerts",
+        "Response Centre",
+        "Evidence",
+        "Cryptographic Benchmarks",
+        "System Status and Settings",
+    ]
     for page in pages:
         # Find radio widget and select page
         if at.sidebar.radio:
