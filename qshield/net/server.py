@@ -306,11 +306,23 @@ def load_processed_command_ids(results_file=None):
             if (
                 isinstance(result, dict)
                 and result.get("command_id")
-                and result.get("status") in {"executed", "rejected", "failed", "deferred"}
+                and result.get("status") in {
+                    "executed",
+                    "rejected",
+                    "failed",
+                    "deferred",
+                    "already_disconnected",
+                    "stale",
+                }
             ):
                 processed.add(result["command_id"])
 
     return processed
+
+
+# Track command results in progress to avoid double-processing
+command_results_lock = threading.Lock()
+_suppress_command_print = False
 
 
 def acknowledge_command(command, status, message, results_file=None):
@@ -334,7 +346,8 @@ def acknowledge_command(command, status, message, results_file=None):
             file.flush()
             os.fsync(file.fileno())
 
-    print("Command result:", result)
+    if not _suppress_command_print:
+        print("Command result:", result)
 
     safe_log_event(
         "response_command_" + status,
@@ -469,7 +482,8 @@ def execute_command(command, results_file=None, sessions_file=None):
             "Session termination requested by dashboard",
             results_file=results_file,
         )
-        print("Session termination executed:", session_id)
+        if not _suppress_command_print:
+            print("Session termination executed:", session_id)
     except Exception as exc:
         with active_sessions_lock:
             terminating_sessions.discard(session_id)
@@ -494,6 +508,8 @@ def command_processor(commands_file=None, results_file=None, poll_interval=None)
     except OSError as error:
         print("Unable to load processed command IDs:", error)
         processed_ids = set()
+
+    is_initial_sweep = True
 
     while not command_stop_event.is_set():
 
@@ -526,12 +542,30 @@ def command_processor(commands_file=None, results_file=None, poll_interval=None)
                         if command.get("status") != "queued":
                             continue
 
-                        execute_command(command, results_file=active_results_file)
+                        target_sid = command.get("session_id")
+                        with active_sessions_lock:
+                            is_active = target_sid in active_sessions
+
+                        # During initial startup sweep, historical commands targeting
+                        # inactive sessions are processed silently to prevent printing old results
+                        global _suppress_command_print
+                        old_suppress = _suppress_command_print
+                        if is_initial_sweep and not is_active:
+                            _suppress_command_print = True
+                        try:
+                            execute_command(
+                                command,
+                                results_file=active_results_file,
+                            )
+                        finally:
+                            _suppress_command_print = old_suppress
+
                         processed_ids.add(command_id)
 
         except (OSError, RuntimeError, ValueError) as error:
             print("Command processor error:", error)
 
+        is_initial_sweep = False
         command_stop_event.wait(active_interval)
 
 
