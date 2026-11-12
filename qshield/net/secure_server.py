@@ -1,6 +1,8 @@
 import base64
 import json
+import os
 import socket
+import sys
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -120,7 +122,8 @@ def handle_client(conn, address, server_private, trusted_client):
 
             update_session(
                 session_id, "Active", source_ip,
-                user_id="verified-client",
+                user_id="Verified client",
+                key_generation=0,
             )
             log_event(
                 "HANDSHAKE_SUCCESS", "SUCCESS", source_ip, session_id,
@@ -227,6 +230,14 @@ def handle_client(conn, address, server_private, trusted_client):
                         )
                     except Exception as log_error:
                         print("[RE-KEY LOG ERROR]", log_error)
+                    try:
+                        update_session(
+                            session_id, "Active", source_ip,
+                            user_id="Verified client",
+                            key_generation=rekey_generation,
+                        )
+                    except Exception as update_err:
+                        print("[RE-KEY UPDATE ERROR]", update_err)
                     print(f"[RE-KEY COMPLETE] {session_id[:8]} generation={rekey_generation}")
 
                 reply = f"Q-SHIELD received: {message}".encode("utf-8")
@@ -287,7 +298,13 @@ def handle_client(conn, address, server_private, trusted_client):
 
 
 def main():
-    password = getpass("Server private-key password: ")
+    if not sys.stdin.isatty():
+        password = os.getenv("QSHIELD_SERVER_PASSWORD", "QSHIELD")
+    else:
+        try:
+            password = getpass("Server private-key password: ")
+        except (OSError, EOFError):
+            password = os.getenv("QSHIELD_SERVER_PASSWORD", "QSHIELD")
     server_private = KeyStore.load_private_key(
         "keys/server_private.keystore", password,
         expected_algorithm=SIGNATURE_ALGORITHM,

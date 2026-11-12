@@ -188,7 +188,7 @@ def check_connection_allowed(ip):
 # SESSION MANAGEMENT
 # --------------------------------------------------
 
-def update_session(session_id, status, remote_ip, started_at=None, user_id=None):
+def update_session(session_id, status, remote_ip, started_at=None, user_id=None, key_generation=None):
     with session_lock:
         SESSIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
 
@@ -233,6 +233,12 @@ def update_session(session_id, status, remote_ip, started_at=None, user_id=None)
                 else started_at or datetime.now(timezone.utc).isoformat()
             )
         }
+
+        # Preserve or update key_generation
+        if key_generation is not None:
+            session["key_generation"] = key_generation
+        elif existing and "key_generation" in existing:
+            session["key_generation"] = existing["key_generation"]
 
         # Preserve additional session metadata written by other components.
         if existing and existing.get("key_fingerprint"):

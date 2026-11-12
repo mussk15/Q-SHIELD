@@ -70,13 +70,16 @@ def test_sessions_frame_structure():
             "status": "Active",
             "started_at": "2026-11-11T09:00:00Z",
             "key_fingerprint": "sha256:abc123",
+            "key_generation": 0,
         }
     ]
     frame = sessions_frame(raw)
     assert isinstance(frame, pd.DataFrame)
-    assert list(frame.columns) == ["Session ID", "User", "Remote IP", "Status", "Started", "Key fingerprint"]
+    for col in ["Session ID", "Client IP", "Identity", "Status", "Key Generation", "Started"]:
+        assert col in frame.columns
     assert frame.iloc[0]["Session ID"] == "sess-001"
     assert frame.iloc[0]["Status"] == "Active"
+    assert frame.iloc[0]["Key Generation"] == "Gen 0"
 
 
 def test_commands_frame_merges_acknowledgements():
@@ -119,7 +122,7 @@ def test_commands_frame_merges_acknowledgements():
 
 
 def test_dashboard_headless_page_navigation():
-    """Verify that every dashboard page loads and renders without exceptions."""
+    """Verify that all six dashboard pages load and render without exceptions."""
     app_path = Path(__file__).resolve().parents[1] / "dashboard" / "app.py"
     at = AppTest.from_file(str(app_path), default_timeout=20)
     at.run()
@@ -130,21 +133,16 @@ def test_dashboard_headless_page_navigation():
     at.run()
     assert not at.exception
 
-    # Test pages via sidebar radio
+    # Test exact 6 pages via sidebar radio
     pages = [
         "Overview",
-        "Secure Communication",
-        "File Transfer",
-        "Sessions",
-        "Network Monitoring",
         "Threat Alerts",
+        "Sessions",
         "Response Centre",
         "Evidence",
         "Cryptographic Benchmarks",
-        "System Status and Settings",
     ]
     for page in pages:
-        # Find radio widget and select page
         if at.sidebar.radio:
             at.sidebar.radio[0].set_value(page)
             at.run()

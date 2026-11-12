@@ -1,5 +1,7 @@
 import base64
+import os
 import socket
+import sys
 from getpass import getpass
 
 from qshield.crypto.aead import AES256GCM, EncryptedMessage
@@ -26,7 +28,13 @@ AAD = b"QSHIELD_APP_V1"
 
 
 def main():
-    password = getpass("Client private-key password: ")
+    if not sys.stdin.isatty():
+        password = os.getenv("QSHIELD_CLIENT_PASSWORD", "QSHIELD")
+    else:
+        try:
+            password = getpass("Client private-key password: ")
+        except (OSError, EOFError):
+            password = os.getenv("QSHIELD_CLIENT_PASSWORD", "QSHIELD")
     client_private = KeyStore.load_private_key(
         "keys/client_private.keystore", password,
         expected_algorithm=SIGNATURE_ALGORITHM,
