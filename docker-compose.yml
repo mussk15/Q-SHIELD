@@ -1,0 +1,111 @@
+# =====================================================================
+# Q-SHIELD CLOUD ORCHESTRATION (DOCKER COMPOSE)
+# Services:
+#   1. qshield-server: Persistent Post-Quantum Secure TCP Server (Port 5001)
+#   2. qshield-dashboard: Authenticated 6-Page Security Operations Dashboard (Port 8501)
+#   3. caddy: Automatic TLS / Let's Encrypt HTTPS Reverse Proxy (Ports 80, 443)
+# Shared Persistent Volume:
+#   qshield-data: Persists sessions.jsonl, events.jsonl, commands.jsonl, evidence.jsonl
+# =====================================================================
+
+services:
+  # --------------------------------------------------
+  # Service 1: Post-Quantum Secure TCP Server
+  # --------------------------------------------------
+  qshield-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: qshield-secure-server
+    restart: unless-stopped
+    command: ["python", "-m", "qshield.net.secure_server", "--host", "0.0.0.0", "--port", "5001"]
+    ports:
+      - "5001:5001"
+    environment:
+      - QSHIELD_SERVER_HOST=0.0.0.0
+      - QSHIELD_SERVER_PORT=5001
+      - QSHIELD_DATA_DIR=/app/data
+      - QSHIELD_SERVER_PASSWORD=${QSHIELD_SERVER_PASSWORD:-QSHIELD}
+    volumes:
+      - qshield-data:/app/data
+      - ./keys:/app/keys:ro
+    healthcheck:
+      test: ["CMD", "python", "scripts/health_check.py", "--skip-dashboard", "--server-host", "127.0.0.1", "--server-port", "5001"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - qshield-net
+
+  # --------------------------------------------------
+  # Service 2: Authenticated Streamlit Operations Dashboard
+  # --------------------------------------------------
+  qshield-dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: qshield-operations-dashboard
+    restart: unless-stopped
+    command: [
+      "streamlit", "run", "dashboard/app.py",
+      "--server.port", "8501",
+      "--server.address", "0.0.0.0",
+      "--server.headless", "true",
+      "--browser.serverAddress", "0.0.0.0"
+    ]
+    ports:
+      - "8501:8501"
+    environment:
+      - QSHIELD_SERVER_HOST=qshield-server
+      - QSHIELD_SERVER_PORT=5001
+      - QSHIELD_DATA_DIR=/app/data
+      - QSHIELD_DASHBOARD_USERNAME=${QSHIELD_DASHBOARD_USERNAME:-analyst}
+      - QSHIELD_DASHBOARD_PASSWORD=${QSHIELD_DASHBOARD_PASSWORD:-}
+      - QSHIELD_DASHBOARD_PASSWORD_HASH=${QSHIELD_DASHBOARD_PASSWORD_HASH:-}
+    volumes:
+      - qshield-data:/app/data
+      - ./keys:/app/keys:ro
+    depends_on:
+      - qshield-server
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8501/_stcore/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - qshield-net
+
+  # --------------------------------------------------
+  # Service 3: Caddy Automatic HTTPS Reverse Proxy
+  # --------------------------------------------------
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: qshield-caddy-proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - QSHIELD_DOMAIN=${QSHIELD_DOMAIN:-localhost}
+      - ACME_EMAIL=${ACME_EMAIL:-admin@example.com}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - qshield-dashboard
+    networks:
+      - qshield-net
+
+volumes:
+  qshield-data:
+    driver: local
+  caddy_data:
+  caddy_config:
+
+networks:
+  qshield-net:
+    driver: bridge
+

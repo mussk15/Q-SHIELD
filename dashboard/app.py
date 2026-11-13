@@ -6,6 +6,7 @@ import os
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -19,13 +20,24 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 load_dotenv(ROOT / ".env")
 
+from qshield.security.auth import verify_password  # noqa: E402
 from response.blocklist import block_ip, load_blocklist, unblock_ip  # noqa: E402
 from response.commands import enqueue_command  # noqa: E402
 from response.evidence import append_event, verify_chain  # noqa: E402
 
 
+def get_config_val(key: str, default: str = "") -> str:
+    """Retrieve configuration from Streamlit secrets (st.secrets) or environment variables."""
+    try:
+        if hasattr(st, "secrets") and key in st.secrets:
+            return str(st.secrets[key])
+    except Exception:
+        pass
+    return os.getenv(key, default)
+
+
 def resolve_data_dir() -> Path:
-    configured = Path(os.getenv("QSHIELD_DATA_DIR", "data"))
+    configured = Path(get_config_val("QSHIELD_DATA_DIR", "data"))
     return configured if configured.is_absolute() else ROOT / configured
 
 
@@ -159,9 +171,17 @@ def format_dataframe_for_display(df: pd.DataFrame) -> pd.DataFrame:
     return display_df
 
 
-def is_server_listening(host: str = "127.0.0.1", port: int = 5001) -> bool:
+SERVER_HOST = get_config_val("QSHIELD_SERVER_HOST", "127.0.0.1")
+SERVER_PORT = int(get_config_val("QSHIELD_SERVER_PORT", "5001"))
+
+
+def is_server_listening(host: str | None = None, port: int | None = None) -> bool:
+    target_host = host or SERVER_HOST
+    if target_host in ("0.0.0.0", ""):
+        target_host = "127.0.0.1"
+    target_port = port or SERVER_PORT
     try:
-        with socket.create_connection((host, port), timeout=0.2):
+        with socket.create_connection((target_host, target_port), timeout=0.3):
             return True
     except (OSError, ConnectionRefusedError):
         return False
@@ -297,14 +317,33 @@ def page_header(title: str, subtitle: str) -> None:
 
 
 def login() -> bool:
-    expected_username = os.getenv("QSHIELD_DASHBOARD_USERNAME", "analyst")
-    expected_password = os.getenv("QSHIELD_DASHBOARD_PASSWORD", "")
-    if not expected_password or expected_password.startswith("replace-with-"):
-        st.error("Configure QSHIELD_DASHBOARD_PASSWORD in your .env file before starting the dashboard.")
-        st.code("QSHIELD_DASHBOARD_USERNAME=analyst\nQSHIELD_DASHBOARD_PASSWORD=choose-your-own-strong-password\nQSHIELD_DATA_DIR=data")
+    expected_username = get_config_val("QSHIELD_DASHBOARD_USERNAME", "analyst")
+    expected_password = get_config_val("QSHIELD_DASHBOARD_PASSWORD", "")
+    expected_hash = get_config_val("QSHIELD_DASHBOARD_PASSWORD_HASH", "")
+
+    if not expected_hash and (not expected_password or expected_password.startswith("replace-with-")):
+        st.error("Configure authentication secrets before starting the dashboard.")
+        st.markdown(
+            "**Streamlit Community Cloud:** Open your app settings &rarr; **Secrets**, and add:\n"
+            "```toml\n"
+            'QSHIELD_DASHBOARD_USERNAME = "analyst"\n'
+            'QSHIELD_DASHBOARD_PASSWORD = "choose-your-own-strong-password"\n'
+            "# Or use a salted scrypt hash (recommended):\n"
+            '# QSHIELD_DASHBOARD_PASSWORD_HASH = "scrypt$16384$8$1$..."\n'
+            "```\n\n"
+            "**Local Development:** Configure `QSHIELD_DASHBOARD_PASSWORD` in your `.env` file."
+        )
         st.stop()
+
     if st.session_state.get("logged_in", False):
         return True
+
+    now = time.time()
+    lockout_until = st.session_state.get("login_lockout_until", 0.0)
+    if now < lockout_until:
+        remaining = int(lockout_until - now)
+        st.error(f"Account temporarily locked out for security. Please try again in {remaining} second(s).")
+        st.stop()
 
     st.markdown(
         '<div class="qs-hero"><div class="qs-kicker">SECURITY OPERATIONS CONSOLE</div>'
@@ -314,24 +353,40 @@ def login() -> bool:
         unsafe_allow_html=True,
     )
     with st.form("login_form"):
-        username = st.text_input("Analyst username", value="analyst")
+        username = st.text_input("Analyst username", value=expected_username)
         password = st.text_input("Password", type="password")
         submitted = st.form_submit_button("Sign in", width="stretch")
+
     if submitted:
         user_ok = hmac.compare_digest(username.strip(), expected_username)
-        password_ok = hmac.compare_digest(password, expected_password)
+        if expected_hash:
+            password_ok = verify_password(password, expected_hash)
+        else:
+            password_ok = hmac.compare_digest(password, expected_password)
+
         if user_ok and password_ok:
+            st.session_state["login_failed_attempts"] = 0
+            st.session_state["login_lockout_until"] = 0.0
             st.session_state["logged_in"] = True
             st.rerun()
-        st.error("Incorrect username or password.")
-    st.caption("Local classroom prototype only; this is not production-grade authentication.")
+
+        attempts = st.session_state.get("login_failed_attempts", 0) + 1
+        st.session_state["login_failed_attempts"] = attempts
+        if attempts >= 5:
+            st.session_state["login_lockout_until"] = now + 60.0
+            st.error("Too many failed login attempts. Locked out for 60 seconds.")
+        else:
+            st.error(f"Incorrect username or password. ({5 - attempts} attempt(s) remaining)")
+
+    auth_type = "scrypt hash verification (hardened)" if expected_hash else "local password verification"
+    st.caption(f"Authenticated access ({auth_type}). Brute-force rate limiting active.")
     return False
 
 
 # -------------------- 1. OVERVIEW PAGE --------------------
 def overview(events: list[dict[str, Any]], alerts: pd.DataFrame, sessions: pd.DataFrame, blocked: list[dict[str, Any]]) -> None:
     server_online = is_server_listening()
-    server_status = "ONLINE (Port 5001)" if server_online else "OFFLINE"
+    server_status = f"ONLINE (Port {SERVER_PORT})" if server_online else "OFFLINE"
 
     open_count = 0
     critical_count = 0
@@ -443,6 +498,48 @@ def alerts_page(alerts: pd.DataFrame) -> None:
 
     st.metric("MATCHING ALERTS", len(filtered))
     st.dataframe(format_dataframe_for_display(filtered), width="stretch", hide_index=True, height=500)
+
+    st.markdown('<div class="qs-section">Network Traffic Inspection & Detection</div>', unsafe_allow_html=True)
+    with st.expander("Offline PCAP / PCAPNG Network Traffic Analysis", expanded=False):
+        st.markdown(
+            "Upload a network packet capture or replay standard benchmark traffic (`normal.pcapng`, `port_scan.pcapng`) "
+            "to extract sliding-window flow features and evaluate rule-based and Isolation Forest ML detections."
+        )
+        pcap_source = st.radio("PCAP source", ["Standard Lab Captures", "Upload .pcap / .pcapng file"], horizontal=True)
+        target_path: Path | None = None
+
+        if pcap_source == "Standard Lab Captures":
+            lab_files = [f for f in [DATA_DIR / "port_scan.pcapng", DATA_DIR / "normal.pcapng"] if f.exists()]
+            if lab_files:
+                selected_lab = st.selectbox("Select lab file", [f.name for f in lab_files])
+                target_path = DATA_DIR / selected_lab
+            else:
+                st.warning("No standard lab captures found in data directory.")
+        else:
+            uploaded = st.file_uploader("Upload packet capture file", type=["pcap", "pcapng"])
+            if uploaded:
+                temp_pcap = DATA_DIR / f"_upload_{uploaded.name}"
+                temp_pcap.write_bytes(uploaded.getbuffer())
+                target_path = temp_pcap
+
+        if target_path and st.button("Run Packet Inspection & IDS Analysis"):
+            with st.spinner(f"Replaying {target_path.name} through IDS engines..."):
+                try:
+                    res = subprocess.run(
+                        [sys.executable, "scripts/run_sensor.py", "--pcap", str(target_path)],
+                        capture_output=True,
+                        text=True,
+                        cwd=str(ROOT),
+                        timeout=90,
+                    )
+                    if res.returncode == 0:
+                        st.success(f"PCAP analysis complete: {target_path.name}")
+                        st.code(res.stdout)
+                        st.rerun()
+                    else:
+                        st.error(f"PCAP analysis failed: {res.stderr}")
+                except Exception as exc:
+                    st.error(f"Error running PCAP sensor: {exc}")
 
 
 # -------------------- 3. SESSIONS PAGE --------------------
@@ -609,23 +706,37 @@ def benchmarks_page() -> None:
         st.altair_chart(chart, width="stretch")
 
     st.divider()
-    if st.button("Rerun Benchmarks Now (20 iterations)"):
-        with st.spinner("Executing post-quantum vs classical benchmarks..."):
-            try:
-                res = subprocess.run(
-                    [sys.executable, "-m", "benchmarks.bench_pq_vs_classic", "--iterations", "20", "--output", str(BENCHMARKS_FILE)],
-                    capture_output=True,
-                    text=True,
-                    cwd=str(ROOT),
-                    timeout=30,
-                )
-                if res.returncode == 0:
-                    st.success("Benchmarks completed and updated successfully!")
-                    st.rerun()
-                else:
-                    st.error(f"Benchmark run failed: {res.stderr}")
-            except Exception as exc:
-                st.error(f"Error running benchmark: {exc}")
+    oqs_supported = False
+    try:
+        import oqs
+        _ = oqs.KeyEncapsulation("ML-KEM-768")
+        oqs_supported = True
+    except Exception:
+        oqs_supported = False
+
+    if oqs_supported:
+        if st.button("Rerun Benchmarks Now (20 iterations)"):
+            with st.spinner("Executing post-quantum vs classical benchmarks..."):
+                try:
+                    res = subprocess.run(
+                        [sys.executable, "-m", "benchmarks.bench_pq_vs_classic", "--iterations", "20", "--output", str(BENCHMARKS_FILE)],
+                        capture_output=True,
+                        text=True,
+                        cwd=str(ROOT),
+                        timeout=30,
+                    )
+                    if res.returncode == 0:
+                        st.success("Benchmarks completed and updated successfully!")
+                        st.rerun()
+                    else:
+                        st.error(f"Benchmark run failed: {res.stderr}")
+                except Exception as exc:
+                    st.error(f"Error running benchmark: {exc}")
+    else:
+        st.info(
+            "Live benchmark re-computation requires native C liboqs (available in local environments and dedicated VPS/containers). "
+            "Displaying verified post-quantum vs classical benchmark metrics from data/benchmarks.json."
+        )
 
 
 # -------------------- APPLICATION ENTRY --------------------

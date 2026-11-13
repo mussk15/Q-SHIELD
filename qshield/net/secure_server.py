@@ -45,6 +45,7 @@ from qshield.net.server import (
     check_connection_allowed,
     command_processor,
     command_stop_event,
+    reconcile_active_sessions,
     terminating_sessions,
     update_session,
     acknowledge_command,
@@ -298,6 +299,18 @@ def handle_client(conn, address, server_private, trusted_client):
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Q-SHIELD Post-Quantum Secure Server")
+    parser.add_argument("--host", default=os.getenv("QSHIELD_SERVER_HOST", HOST), help="Bind host (default: 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=int(os.getenv("QSHIELD_SERVER_PORT", str(PORT))), help="Bind port (default: 5001)")
+    args, _ = parser.parse_known_args()
+    bind_host = args.host
+    bind_port = args.port
+
+    reconciled = reconcile_active_sessions()
+    if reconciled > 0:
+        print(f"Reconciled {reconciled} orphaned session(s) from previous server run.")
+
     if not sys.stdin.isatty():
         password = os.getenv("QSHIELD_SERVER_PASSWORD", "QSHIELD")
     else:
@@ -323,9 +336,9 @@ def main():
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
             server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            server.bind((HOST, PORT))
+            server.bind((bind_host, bind_port))
             server.listen(10)
-            print(f"Q-SHIELD secure server listening on {HOST}:{PORT}")
+            print(f"Q-SHIELD secure server listening on {bind_host}:{bind_port}")
             print("Dashboard command processor is active.")
 
             while True:

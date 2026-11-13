@@ -280,6 +280,64 @@ def update_session(session_id, status, remote_ip, started_at=None, user_id=None,
         return session
 
 
+def reconcile_active_sessions(sessions_file=None):
+    """
+    On server startup, reconcile any orphaned sessions in sessions.jsonl.
+    Any sessions recorded as 'Active' or 'Connected' from a prior runtime
+    are marked 'Disconnected' with reason 'Server restarted'.
+    """
+    target_file = Path(sessions_file) if sessions_file else SESSIONS_FILE
+    if not target_file.exists():
+        return 0
+
+    reconciled_count = 0
+    with session_lock:
+        records = []
+        modified = False
+        now_str = datetime.now(timezone.utc).isoformat()
+
+        with target_file.open("r", encoding="utf-8") as file:
+            for line in file:
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(record, dict):
+                    status = str(record.get("status", "")).lower()
+                    if status in ("active", "connected", "established"):
+                        record["status"] = "Disconnected"
+                        record["ended_at"] = now_str
+                        record["disconnect_reason"] = "Server restarted"
+                        modified = True
+                        reconciled_count += 1
+                    records.append(record)
+
+        if modified:
+            temporary_path = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    dir=DATA_DIR,
+                    prefix=".sessions_reconcile_",
+                    suffix=".tmp",
+                    delete=False,
+                ) as temp_f:
+                    temporary_path = Path(temp_f.name)
+                    for r in records:
+                        temp_f.write(json.dumps(r, ensure_ascii=False) + "\n")
+                    temp_f.flush()
+                    os.fsync(temp_f.fileno())
+                os.replace(temporary_path, target_file)
+            finally:
+                if temporary_path is not None:
+                    temporary_path.unlink(missing_ok=True)
+
+    return reconciled_count
+
+
 # --------------------------------------------------
 # COMMAND RESULTS AND ACKNOWLEDGEMENTS
 # --------------------------------------------------

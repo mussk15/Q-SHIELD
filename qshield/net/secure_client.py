@@ -28,6 +28,14 @@ AAD = b"QSHIELD_APP_V1"
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Q-SHIELD Remote Post-Quantum Secure Client")
+    parser.add_argument("host", nargs="?", default=os.getenv("QSHIELD_SERVER_HOST", HOST), help="Server host (default: 127.0.0.1)")
+    parser.add_argument("port", nargs="?", type=int, default=int(os.getenv("QSHIELD_SERVER_PORT", str(PORT))), help="Server port (default: 5001)")
+    args, _ = parser.parse_known_args()
+    target_host = args.host
+    target_port = args.port
+
     if not sys.stdin.isatty():
         password = os.getenv("QSHIELD_CLIENT_PASSWORD", "QSHIELD")
     else:
@@ -47,7 +55,8 @@ def main():
     )
 
     print("Client identity loaded.")
-    with socket.create_connection((HOST, PORT), timeout=60) as conn:
+    print(f"Connecting to Q-SHIELD secure server at {target_host}:{target_port}...")
+    with socket.create_connection((target_host, target_port), timeout=60) as conn:
         conn.settimeout(300)
         hello = ServerHello.from_bytes(receive_message(conn).encode("utf-8"))
         result = respond_to_server(hello, trusted_server, client_identity)

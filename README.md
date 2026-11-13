@@ -210,7 +210,40 @@ The Streamlit dashboard monitors and manages the project across six dedicated pa
 
 ---
 
-## 6. Cryptographic Benchmarks
+## 6. Cloud Deployment & Container Orchestration
+
+Q-SHIELD is architected for containerized cloud deployment on any Linux host (AWS EC2, DigitalOcean, Linode, Hetzner, or local Docker):
+
+```text
+               [Internet Clients]
+                       |
+       +---------------+---------------+
+       | (HTTPS / 443)                 | (TCP / 5001)
+       v                               v
+[Caddy Reverse Proxy]       [qshield-secure-server]
+       |                               |
+       v                               |
+[qshield-dashboard]                    |
+       |                               |
+       +---------------+---------------+
+                       |
+                       v
+         [Shared Persistent Volume: /app/data]
+```
+
+### Deployment Features
+- **Multi-Stage Dockerfile**: Compiles native C `liboqs` v0.16.0 from source in Debian Bookworm and installs `liboqs-python` for Linux x86_64/arm64.
+- **Independent Services**: Dashboard and TCP server run as separate container services; restarting the dashboard does not drop connected socket sessions.
+- **Automated Startup Reconciliation**: If the server restarts after an abnormal termination, it automatically marks orphaned active sessions as `Disconnected (Server restarted)`.
+- **Hardened Authentication**: NIST-aligned `scrypt` salted password hashing with brute-force rate limiting (lockout after 5 failed attempts).
+- **Automated Let's Encrypt HTTPS**: Caddy reverse proxy terminates TLS on ports 80/443.
+- **Remote Client Support**: External clients connect over the internet using `python -m qshield.net.secure_client <CLOUD_IP> 5001`.
+
+See the comprehensive [Cloud Deployment Guide](docs/DEPLOYMENT_GUIDE.md) for full setup instructions, cloud provider evaluations, and firewall configuration.
+
+---
+
+## 7. Cryptographic Benchmarks
 
 Benchmark post-quantum operations against classical NIST P-256 baselines:
 ```powershell
@@ -237,7 +270,7 @@ Run the live interactive re-key verification script:
 python scripts/verify_live_rekey.py
 ```
 
-### Test Suite Breakdown (107 Tests Total - 100% Passing):
+### Test Suite Breakdown (115 Tests Total - 100% Passing):
 - `tests/test_kem.py`: ML-KEM-768 encapsulation, decapsulation, invalid key rejection (4 tests)
 - `tests/test_sig.py`: ML-DSA-65 signing, verification, tampering rejection (6 tests)
 - `tests/test_kdf.py`: HKDF-SHA256 deterministic key derivation and context separation (6 tests)
@@ -259,7 +292,8 @@ python scripts/verify_live_rekey.py
 - `tests/test_event_logging.py`: Security event logging format and thread safety (4 tests)
 - `tests/test_crypto_backend.py`: OQS backend algorithm verification (2 tests)
 - `tests/test_benchmark.py`: Cryptographic algorithm benchmarking smoke tests (2 tests)
-- `tests/test_dashboard.py`: Streamlit dashboard headless page rendering across all 6 pages and dataframes (6 tests)
+- `tests/test_dashboard.py`: Streamlit dashboard headless page rendering across all 6 pages, sanitization, and Arrow compatibility (9 tests)
+- `tests/test_cloud_deployment.py`: Scrypt password hashing, session restart reconciliation, and deployment health checks (5 tests)
 - `tests/test_e2e_integration.py`: Complete End-to-End integration across all subsystems, including full rekey workflow (2 tests)
 
 ---

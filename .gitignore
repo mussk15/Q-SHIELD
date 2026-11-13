@@ -12,6 +12,8 @@ __pycache__/
 .env
 .env.*
 !.env.example
+.streamlit/secrets.toml
+!.streamlit/secrets.toml.example
 
 # Private keys and local keystores
 keys/
@@ -39,3 +41,4 @@ logs/
 *.keystore
 data/received_files/
 data/test_files/
+data/_upload_*

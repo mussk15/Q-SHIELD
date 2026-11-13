@@ -1,0 +1,14 @@
+{
+    email {$ACME_EMAIL:admin@example.com}
+    admin off
+}
+
+{$QSHIELD_DOMAIN:localhost} {
+    reverse_proxy qshield-dashboard:8501 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+}
+
