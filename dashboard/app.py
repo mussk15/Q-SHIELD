@@ -111,6 +111,54 @@ def value(item: dict[str, Any], *keys: str, default: Any = "") -> Any:
     return default
 
 
+def sanitize_cell_value(val: Any) -> Any:
+    """Format an individual cell value into a clean, Arrow-compatible scalar."""
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return ""
+    if isinstance(val, (dict, list)):
+        try:
+            return json.dumps(val, ensure_ascii=False)
+        except Exception:
+            return str(val)
+    if isinstance(val, (bytes, bytearray)):
+        try:
+            return val.decode("utf-8")
+        except UnicodeDecodeError:
+            return val.hex()
+    if isinstance(val, (int, float, bool)):
+        return val
+    return str(val)
+
+
+def format_dataframe_for_display(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Format a DataFrame safely for Streamlit / PyArrow table serialization.
+    Preserves numeric, boolean, and datetime dtypes, while ensuring object/string
+    columns containing mixed types (e.g. dicts, lists, bytes, None, strings) are
+    consistently converted to clean, Arrow-compatible strings.
+    """
+    if df.empty:
+        return df.copy()
+
+    display_df = df.copy()
+
+    for col in display_df.columns:
+        col_series = display_df[col]
+
+        # Preserve numeric, boolean, datetime types if pandas already typed them
+        if (
+            pd.api.types.is_numeric_dtype(col_series)
+            or pd.api.types.is_bool_dtype(col_series)
+            or pd.api.types.is_datetime64_any_dtype(col_series)
+        ):
+            continue
+
+        # For object, string, or mixed columns: sanitize each element and cast to string
+        display_df[col] = col_series.apply(sanitize_cell_value).astype(str)
+
+    return display_df
+
+
 def is_server_listening(host: str = "127.0.0.1", port: int = 5001) -> bool:
     try:
         with socket.create_connection((host, port), timeout=0.2):
@@ -132,7 +180,7 @@ def alerts_frame(records: list[dict[str, Any]]) -> pd.DataFrame:
                 value(row, "severity", "priority", default="LOW")
             ).upper(),
             "Status": value(row, "status", "state", default="Open"),
-            "Evidence": value(row, "description", "evidence", "details"),
+            "Evidence": sanitize_cell_value(value(row, "description", "evidence", "details")),
         }
         for row in records
     ]
@@ -360,11 +408,11 @@ def overview(events: list[dict[str, Any]], alerts: pd.DataFrame, sessions: pd.Da
                 "Event Type": value(e, "event_type", "type"),
                 "Source IP": value(e, "source_ip", "ip", default="127.0.0.1"),
                 "Status": value(e, "status", default="INFO"),
-                "Details": value(e, "details", "message", default=""),
+                "Details": sanitize_cell_value(value(e, "details", "message", default="")),
             }
             for e in reversed(events[-8:])
         ])
-        st.dataframe(events_df, width="stretch", hide_index=True)
+        st.dataframe(format_dataframe_for_display(events_df), width="stretch", hide_index=True)
     else:
         st.info("No security events recorded in data/events.jsonl yet.")
 
@@ -394,7 +442,7 @@ def alerts_page(alerts: pd.DataFrame) -> None:
         ]
 
     st.metric("MATCHING ALERTS", len(filtered))
-    st.dataframe(filtered, width="stretch", hide_index=True, height=500)
+    st.dataframe(format_dataframe_for_display(filtered), width="stretch", hide_index=True, height=500)
 
 
 # -------------------- 3. SESSIONS PAGE --------------------
@@ -423,7 +471,7 @@ def sessions_page(sessions: pd.DataFrame) -> None:
     # Display exact requested table headers: Session ID | Client IP | Identity | Status | Key Generation | Started
     view_cols = ["Session ID", "Client IP", "Identity", "Status", "Key Generation", "Started"]
     st.dataframe(
-        display_df[view_cols],
+        format_dataframe_for_display(display_df[view_cols]),
         width="stretch",
         hide_index=True,
         height=480,
@@ -463,7 +511,7 @@ def response_page(sessions: pd.DataFrame, blocked: list[dict[str, Any]]) -> None
         with right:
             st.markdown("### Active Simulated Blocklist")
             if blocked:
-                st.dataframe(pd.DataFrame(blocked), width="stretch", hide_index=True)
+                st.dataframe(format_dataframe_for_display(pd.DataFrame(blocked)), width="stretch", hide_index=True)
             else:
                 st.info("No IPs blocked currently.")
 
@@ -498,7 +546,7 @@ def response_page(sessions: pd.DataFrame, blocked: list[dict[str, Any]]) -> None
         commands_list, _ = read_jsonl(COMMANDS_FILE)
         results_list, _ = read_jsonl(COMMAND_RESULTS_FILE)
         if commands_list:
-            st.dataframe(commands_frame(commands_list, results_list), width="stretch", hide_index=True)
+            st.dataframe(format_dataframe_for_display(commands_frame(commands_list, results_list)), width="stretch", hide_index=True)
         else:
             st.info("No server commands queued yet.")
 
@@ -521,7 +569,7 @@ def evidence_page() -> None:
         frame = pd.DataFrame(records)
         if "sequence" in frame.columns:
             frame = frame.sort_values("sequence", ascending=False)
-        st.dataframe(frame, width="stretch", hide_index=True, height=480)
+        st.dataframe(format_dataframe_for_display(frame), width="stretch", hide_index=True, height=480)
     else:
         st.info("No evidence records found in data/evidence.jsonl.")
     st.caption("A cryptographic hash chain makes post-facto modification detectable when validated against previous event hashes.")
@@ -547,7 +595,7 @@ def benchmarks_page() -> None:
         st.info("Benchmark file is empty.")
         return
 
-    st.dataframe(frame, width="stretch", hide_index=True)
+    st.dataframe(format_dataframe_for_display(frame), width="stretch", hide_index=True)
 
     numeric = frame.select_dtypes(include="number").columns.tolist()
     label = next((col for col in ["algorithm", "name", "scheme"] if col in frame.columns), None)
